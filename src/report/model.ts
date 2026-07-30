@@ -24,8 +24,12 @@ export interface ThemeRow {
   history: number[];
   /** lifetime assignments, across all windows */
   memberCount: number;
+  /** earliest window with traffic; equal to the reported window means "first seen here" */
+  firstWindow?: string;
   lastSeenWindow?: string;
   exemplarTraceIds: string[];
+  /** first appeared in the window being reported on */
+  isNewHere: boolean;
 }
 
 export interface FacetReport {
@@ -79,7 +83,9 @@ export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildR
       history,
       memberCount: theme.memberCount,
       exemplarTraceIds: theme.exemplarTraceIds,
+      isNewHere: window !== undefined && theme.firstWindow === window && count > 0,
     };
+    if (theme.firstWindow) row.firstWindow = theme.firstWindow;
     if (theme.lastSeenWindow) row.lastSeenWindow = theme.lastSeenWindow;
     if (previousWindow) {
       const prevTotal = stats.totals.get(previousWindow) ?? 0;

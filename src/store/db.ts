@@ -42,6 +42,7 @@ const SCHEMA = `
     exemplar_trace_ids TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    first_window TEXT,
     last_seen_window TEXT,
     note TEXT
   );
@@ -280,8 +281,8 @@ export class SiftStore {
     this.db
       .prepare(
         `INSERT INTO themes (id, facet, label, description, state, centroid, member_count,
-                             exemplar_trace_ids, created_at, updated_at, last_seen_window, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             exemplar_trace_ids, created_at, updated_at, first_window, last_seen_window, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         t.id,
@@ -294,6 +295,7 @@ export class SiftStore {
         JSON.stringify(t.exemplarTraceIds),
         t.createdAt,
         t.updatedAt,
+        t.firstWindow ?? null,
         t.lastSeenWindow ?? null,
         t.note ?? null,
       );
@@ -303,7 +305,7 @@ export class SiftStore {
     this.db
       .prepare(
         `UPDATE themes SET label = ?, description = ?, state = ?, centroid = ?, member_count = ?,
-                           exemplar_trace_ids = ?, updated_at = ?, last_seen_window = ?, note = ?
+                           exemplar_trace_ids = ?, updated_at = ?, first_window = ?, last_seen_window = ?, note = ?
          WHERE id = ?`,
       )
       .run(
@@ -314,6 +316,7 @@ export class SiftStore {
         t.memberCount,
         JSON.stringify(t.exemplarTraceIds),
         t.updatedAt,
+        t.firstWindow ?? null,
         t.lastSeenWindow ?? null,
         t.note ?? null,
         t.id,
@@ -481,6 +484,7 @@ function rowToTheme(r: Row): Theme {
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
   };
+  if (r.first_window != null) t.firstWindow = r.first_window as string;
   if (r.last_seen_window != null) t.lastSeenWindow = r.last_seen_window as string;
   if (r.note != null) t.note = r.note as string;
   return t;

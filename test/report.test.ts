@@ -104,6 +104,23 @@ describe("buildFacetReport", () => {
     assert.equal(report.rediscoverThreshold, DEFAULT_CONFIG.rediscoverResidualShare);
   });
 
+  test("marks a theme that first appears in the reported window", () => {
+    const s = demoStore();
+    s.updateTheme({ ...s.getTheme("SIFT-21")!, firstWindow: "v1.3" });
+    s.updateTheme({ ...s.getTheme("SIFT-3")!, firstWindow: "v1.2" });
+
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET });
+    assert.equal(report.rows.find((r) => r.id === "SIFT-21")!.isNewHere, true);
+    assert.equal(report.rows.find((r) => r.id === "SIFT-3")!.isNewHere, false);
+  });
+
+  test("a theme first seen earlier is not new here, whatever its state says", () => {
+    const s = demoStore();
+    s.updateTheme({ ...s.getTheme("SIFT-21")!, firstWindow: "v1.2", state: "new" });
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET, window: "v1.3" });
+    assert.equal(report.rows.find((r) => r.id === "SIFT-21")!.isNewHere, false);
+  });
+
   test("orders by current share, biggest first", () => {
     const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET });
     const shares = report.rows.map((r) => r.share);

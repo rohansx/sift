@@ -341,6 +341,37 @@ describe("discovery", () => {
     assert.ok(created.every((t) => t.facet === FACET));
   });
 
+  test("a theme discovered with plenty of traffic is active, not 'new'", async () => {
+    // At bootstrap the biggest theme is the bulk of the traffic. Calling it
+    // NEW forever — as the prototype did — makes the state column meaningless.
+    const h = harness({ minClusterSize: 3, activateAfter: 4 });
+    for (let i = 0; i < 6; i++) h.seed(`big-${i}`, "tool retry loop", [1, 0.01 * i, 0], { version: "v1" });
+    for (let i = 0; i < 3; i++) h.seed(`small-${i}`, "refund deflected", [0, 1, 0.01 * i], { version: "v1" });
+
+    const created = await h.registry.discover(FACET);
+    const big = created.find((t) => t.memberCount === 6)!;
+    const small = created.find((t) => t.memberCount === 3)!;
+    assert.equal(big.state, "active");
+    assert.equal(small.state, "new");
+  });
+
+  test("records the window a theme was first seen in", async () => {
+    const h = harness({ minClusterSize: 3 });
+    for (let i = 0; i < 3; i++) h.seed(`a-${i}`, "tool retry loop", [1, 0.01 * i, 0], { version: "v1.2" });
+    for (let i = 0; i < 3; i++) h.seed(`b-${i}`, "tool retry loop", [1, 0.01 * i, 0.01], { version: "v1.3" });
+    const [theme] = await h.registry.discover(FACET);
+    assert.equal(theme!.firstWindow, "v1.2");
+    assert.equal(theme!.lastSeenWindow, "v1.3");
+  });
+
+  test("a theme discovered only in the newest window is first-seen there", async () => {
+    const h = harness({ minClusterSize: 3, activateAfter: 100 });
+    for (let i = 0; i < 4; i++) h.seed(`late-${i}`, "brand new failure", [1, 0.01 * i, 0], { version: "v9.9" });
+    const [theme] = await h.registry.discover(FACET);
+    assert.equal(theme!.firstWindow, "v9.9");
+    assert.equal(theme!.state, "new");
+  });
+
   test("labels come from the labeler, one call per cluster", async () => {
     const h = harness({ minClusterSize: 3 });
     seedResidualPile(h);

@@ -50,7 +50,11 @@ export function renderIssuesList(report: FacetReport, opts: IssuesListOptions = 
   const labelWidth = Math.min(44, Math.max(...shown.map((r) => r.label.length)));
 
   for (const row of shown) {
-    out.push(`  ▸ ${row.id.padEnd(idWidth)}  ${truncate(row.label, labelWidth).padEnd(labelWidth)}  ${changeCell(row)}  ${paint(stateTag(row.state), stateColor(row.state))} ${paint(sparkline(row.history), "dim")}`.trimEnd());
+    const tag = row.isNewHere && row.state !== "regressed" ? "NEW" : stateTag(row.state);
+    const color = row.isNewHere && row.state !== "regressed" ? "yellow" : stateColor(row.state);
+    out.push(
+      `  ▸ ${row.id.padEnd(idWidth)}  ${truncate(row.label, labelWidth).padEnd(labelWidth)}  ${changeCell(row)}  ${paint(tag.padEnd(9), color)} ${paint(sparkline(row.history), "dim")}`.trimEnd(),
+    );
   }
 
   const hidden = report.rows.length - shown.length;

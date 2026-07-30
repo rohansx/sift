@@ -31,8 +31,9 @@ export function renderThemeMarkdown(reports: FacetReport[]): string {
     out.push("|---|---|---|---:|---:|---:|---|");
     for (const row of report.rows) {
       const change = row.delta === undefined ? "—" : `${arrow(row.delta)}${formatPercent(Math.abs(row.delta))}`;
+      const state = row.isNewHere && row.state !== "regressed" ? "🆕 new here" : badge(row.state);
       out.push(
-        `| ${row.id} | ${badge(row.state)} | ${escapePipes(row.label)} | ${row.count} | ${formatPercent(row.share)} | ${change} | \`${sparkline(row.history)}\` |`,
+        `| ${row.id} | ${state} | ${escapePipes(row.label)} | ${row.count} | ${formatPercent(row.share)} | ${change} | \`${sparkline(row.history)}\` |`,
       );
     }
     out.push("");

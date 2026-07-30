@@ -67,6 +67,8 @@ export interface Theme {
   exemplarTraceIds: string[];
   createdAt: string;
   updatedAt: string;
+  /** earliest window this theme has traffic in; "first seen in v1.3" */
+  firstWindow?: string;
   /** window tag of the most recent assignment; drives auto-resolve */
   lastSeenWindow?: string;
   /** free-form note set when a human resolves/mutes a theme */

@@ -101,6 +101,7 @@ export class ThemeRegistry {
     theme.centroid = updateCentroid(theme.centroid, theme.memberCount, embedding);
     theme.memberCount += 1;
     theme.lastSeenWindow = window;
+    if (!theme.firstWindow || window < theme.firstWindow) theme.firstWindow = window;
     theme.updatedAt = this.now();
     theme.state = nextStateOnAssignment(from, theme.memberCount, this.cfg.activateAfter);
     if (theme.exemplarTraceIds.length < this.cfg.maxExemplars) {
@@ -268,14 +269,19 @@ export class ThemeRegistry {
         facet,
         label,
         description,
-        state: "new",
+        // A theme discovered at bootstrap out of 340 traces is not "new" — it
+        // is the bulk of the traffic. The activation rule has to apply here too,
+        // or every theme the first run finds is permanently mislabelled.
+        state: members.length >= this.cfg.activateAfter ? "active" : "new",
         centroid: cluster.centroid,
         memberCount: members.length,
         exemplarTraceIds: ranked.slice(0, this.cfg.maxExemplars).map((r) => r.member.traceId),
         createdAt: now,
         updatedAt: now,
       };
+      const firstWindow = windows[0];
       const lastWindow = windows[windows.length - 1];
+      if (firstWindow) theme.firstWindow = firstWindow;
       if (lastWindow) theme.lastSeenWindow = lastWindow;
 
       this.store.transaction(() => {

@@ -1,0 +1,256 @@
+import { test, describe, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * The CLI is exercised as a real process, offline: fake LLM, local hash
+ * embeddings, a temp database. If `sift` cannot take a file of spans and print
+ * an issues list without a network call, the local-first claim is not true.
+ */
+
+const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+
+let dir: string;
+let db: string;
+let tracesPath: string;
+
+function sift(args: string[], opts: { env?: Record<string, string> } = {}) {
+  const result = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      SIFT_LLM_PROVIDER: "fake",
+      SIFT_EMBED_PROVIDER: "hash",
+      SIFT_EMBED_DIMENSIONS: "256",
+      SIFT_DB: db,
+      SIFT_MIN_CLUSTER_SIZE: "4",
+      SIFT_ASSIGN_THRESHOLD: "0.6",
+      ...opts.env,
+    },
+  });
+  return { code: result.status ?? 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+before(() => {
+  dir = mkdtempSync(join(tmpdir(), "sift-cli-"));
+  db = join(dir, "sift.db");
+  tracesPath = join(dir, "traces.jsonl");
+});
+
+after(() => rmSync(dir, { recursive: true, force: true }));
+
+describe("basics", () => {
+  test("version prints just the version", () => {
+    const r = sift(["--version"]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  });
+
+  test("help documents the commands", () => {
+    const r = sift(["help"]);
+    assert.equal(r.code, 0);
+    for (const cmd of ["ingest", "analyze", "report", "delta", "export", "resolve", "demo"]) {
+      assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`), `help should mention ${cmd}`);
+    }
+  });
+
+  test("no arguments prints usage and fails, so scripts notice", () => {
+    const r = sift([]);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /USAGE/);
+  });
+
+  test("an unknown command exits 2 and points at help", () => {
+    const r = sift(["frobnicate"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /unknown command/);
+  });
+
+  test("an unknown flag exits 2 rather than being silently ignored", () => {
+    const r = sift(["report", "--wat"]);
+    assert.equal(r.code, 2);
+  });
+
+  test("a bad config value is reported with the setting's name", () => {
+    const r = sift(["report"], { env: { SIFT_ASSIGN_THRESHOLD: "9" } });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /assignThreshold/);
+  });
+});
+
+describe("the documented quickstart, end to end", () => {
+  test("demo writes synthetic traces", () => {
+    const r = sift(["demo", "--out", tracesPath, "--traces", "120", "--seed", "7"]);
+    assert.equal(r.code, 0);
+    assert.ok(existsSync(tracesPath));
+    assert.match(r.stdout, /240 synthetic traces/);
+    // the next commands to run are printed, so the demo is self-guiding
+    assert.match(r.stdout, /sift analyze/);
+  });
+
+  test("analyze ingests, summarizes, discovers and prints the issues list", () => {
+    const r = sift(["analyze", "--otlp", tracesPath]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /THEMES/);
+    assert.match(r.stdout, /SIFT-\d+/);
+    assert.match(r.stdout, /residual pile/);
+    assert.ok(existsSync(db));
+  });
+
+  test("re-running analyze is safe and does not duplicate anything", () => {
+    const before = JSON.parse(sift(["themes", "--json"]).stdout) as Array<{ id: string }>;
+    const r = sift(["analyze", "--otlp", tracesPath]);
+    assert.equal(r.code, 0, r.stderr);
+    const after = JSON.parse(sift(["themes", "--json"]).stdout) as Array<{ id: string }>;
+    assert.deepEqual(after.map((t) => t.id), before.map((t) => t.id), "theme ids must be stable across runs");
+  });
+
+  test("report renders markdown", () => {
+    const r = sift(["report", "--format", "md", "--facet", "behavior"]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /^# sift report/m);
+    assert.match(r.stdout, /\| id \| state \| label \|/);
+  });
+
+  test("report renders json for tooling", () => {
+    const r = sift(["report", "--json", "--facet", "behavior"]);
+    assert.equal(r.code, 0);
+    const parsed = JSON.parse(r.stdout) as Array<{ facet: string; rows: unknown[] }>;
+    assert.equal(parsed[0]!.facet, "behavior");
+    assert.ok(Array.isArray(parsed[0]!.rows));
+  });
+
+  test("delta compares two releases", () => {
+    const r = sift(["delta", "--from", "v1.2", "--to", "v1.3", "--facet", "behavior"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /DELTA behavior: v1\.2 → v1\.3/);
+  });
+
+  test("delta defaults to the two most recent windows", () => {
+    const r = sift(["delta", "--facet", "behavior"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /v1\.2 → v1\.3/);
+  });
+
+  test("delta says so when there is nothing to compare", () => {
+    const r = sift(["delta", "--facet", "not-a-facet"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /two windows/);
+  });
+});
+
+describe("themes and lifecycle", () => {
+  function firstThemeId(): string {
+    const themes = JSON.parse(sift(["themes", "--json", "--facet", "behavior"]).stdout) as Array<{ id: string }>;
+    assert.ok(themes.length > 0, "expected the analyze run to have produced themes");
+    return themes[0]!.id;
+  }
+
+  test("themes lists what the registry knows", () => {
+    const r = sift(["themes"]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /SIFT-\d+/);
+  });
+
+  test("show explains one theme and tells you how to export it", () => {
+    const r = sift(["show", firstThemeId()]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /exemplar traces/);
+    assert.match(r.stdout, /sift export SIFT-\d+/);
+  });
+
+  test("show on an unknown theme fails with the id", () => {
+    const r = sift(["show", "SIFT-9999"]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /SIFT-9999/);
+  });
+
+  test("resolve, filter by state, then reopen", () => {
+    const id = firstThemeId();
+
+    assert.equal(sift(["resolve", id, "--note", "fixed in v1.4"]).code, 0);
+    const resolved = JSON.parse(sift(["themes", "--json", "--state", "resolved"]).stdout) as Array<{ id: string; note: string }>;
+    assert.ok(resolved.some((t) => t.id === id));
+    assert.equal(resolved.find((t) => t.id === id)!.note, "fixed in v1.4");
+
+    assert.equal(sift(["reopen", id]).code, 0);
+    const active = JSON.parse(sift(["themes", "--json", "--state", "active"]).stdout) as Array<{ id: string }>;
+    assert.ok(active.some((t) => t.id === id));
+  });
+
+  test("mute keeps the theme but takes it out of the deltas", () => {
+    const id = firstThemeId();
+    assert.equal(sift(["mute", id, "--note", "expected"]).code, 0);
+    const delta = sift(["delta", "--from", "v1.2", "--to", "v1.3", "--facet", "behavior", "--json"]).stdout;
+    const parsed = JSON.parse(delta) as { findings: Array<{ themeId: string }> };
+    assert.ok(!parsed.findings.some((f) => f.themeId === id), "a muted theme should not appear in deltas");
+    sift(["reopen", id]);
+  });
+
+  test("relabel changes the words, not the id", () => {
+    const id = firstThemeId();
+    assert.equal(sift(["relabel", id, "--label", "renamed by a human"]).code, 0);
+    const themes = JSON.parse(sift(["themes", "--json"]).stdout) as Array<{ id: string; label: string }>;
+    assert.equal(themes.find((t) => t.id === id)!.label, "renamed by a human");
+  });
+
+  test("an unknown state is rejected with the valid ones", () => {
+    const r = sift(["themes", "--state", "onfire"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /muted/);
+  });
+
+  test("lifecycle commands need a theme id", () => {
+    assert.equal(sift(["resolve"]).code, 2);
+  });
+});
+
+describe("export", () => {
+  test("writes a mastra scorer module to a file", () => {
+    const themes = JSON.parse(sift(["themes", "--json", "--facet", "behavior"]).stdout) as Array<{ id: string }>;
+    const out = join(dir, "scorers", "theme.ts");
+    const r = sift(["export", themes[0]!.id, "--format", "mastra-scorer", "--out", out]);
+    assert.equal(r.code, 0, r.stderr);
+    const content = readFileSync(out, "utf8");
+    assert.match(content, /@mastra\/evals/);
+    assert.match(content, /Generated by sift/);
+  });
+
+  test("prints to stdout when no output file is given", () => {
+    const themes = JSON.parse(sift(["themes", "--json", "--facet", "behavior"]).stdout) as Array<{ id: string }>;
+    const r = sift(["export", themes[0]!.id, "--format", "jsonl"]);
+    assert.equal(r.code, 0);
+    const first = JSON.parse(r.stdout.trim().split("\n")[0]!) as { themeId: string; input: string };
+    assert.equal(first.themeId, themes[0]!.id);
+    assert.ok(first.input.length > 0);
+  });
+
+  test("an unknown format is rejected with the valid ones", () => {
+    const r = sift(["export", "SIFT-1", "--format", "yaml"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /mastra-scorer/);
+  });
+});
+
+describe("output hygiene", () => {
+  test("progress goes to stderr so stdout stays pipeable", () => {
+    const r = sift(["report", "--format", "md"]);
+    assert.ok(!r.stdout.includes("ingested"), "stdout must contain only the report");
+  });
+
+  test("the experimental SQLite warning is suppressed", () => {
+    // Node prints it on every run; in a tool whose output is a readable report
+    // it is pure noise.
+    const r = sift(["themes"]);
+    assert.ok(!r.stderr.includes("SQLite is an experimental feature"), r.stderr);
+  });
+
+  test("terminal output is plain text unless colour is requested", () => {
+    const r = sift(["report", "--facet", "behavior"]);
+    assert.ok(!r.stdout.includes("["), "piped output must not contain escape codes");
+  });
+});
