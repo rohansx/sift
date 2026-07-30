@@ -1,0 +1,50 @@
+{
+  "name": "@siftlabs/sift",
+  "version": "0.1.0",
+  "description": "Sentry-grade issue tracking for agent behavior. Open source trace intelligence over OpenTelemetry GenAI spans.",
+  "type": "module",
+  "bin": {
+    "sift": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-reporter=spec \"test/**/*.test.ts\"",
+    "test:watch": "node --test --watch \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm test",
+    "demo": "node src/cli.ts demo"
+  },
+  "keywords": [
+    "opentelemetry",
+    "otel",
+    "genai",
+    "llm",
+    "agents",
+    "observability",
+    "clustering",
+    "evals",
+    "trace-analysis"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "Apache-2.0"
+}
