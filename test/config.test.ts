@@ -205,6 +205,46 @@ describe("loadConfig validation", () => {
   });
 });
 
+describe("privacy config", () => {
+  test("the gate is on by default", () => {
+    // Summaries leave the building. A tool that says traces are the most
+    // PII-dense artifact you own should not ship with redaction opt-in.
+    const cfg = loadConfig({ cwd: "/nonexistent", env: {} });
+    assert.equal(cfg.privacy.mode, "pseudonymize");
+    assert.equal(cfg.privacy.scope, "trace");
+  });
+
+  test("mode, scope and salt come from the environment", () => {
+    const cfg = loadConfig({
+      cwd: "/nonexistent",
+      env: { SIFT_PRIVACY_MODE: "mask", SIFT_PRIVACY_SCOPE: "global", SIFT_PRIVACY_SALT: "pepper" },
+    });
+    assert.equal(cfg.privacy.mode, "mask");
+    assert.equal(cfg.privacy.scope, "global");
+    assert.equal(cfg.privacy.salt, "pepper");
+  });
+
+  test("an unknown mode or scope is rejected", () => {
+    assert.throws(() => loadConfig({ cwd: "/nonexistent", env: { SIFT_PRIVACY_MODE: "kinda" } }), /privacy\.mode/);
+    assert.throws(() => loadConfig({ cwd: "/nonexistent", env: { SIFT_PRIVACY_SCOPE: "world" } }), /privacy\.scope/);
+  });
+
+  test("an unknown rule name is rejected at load, not at first trace", () => {
+    assert.throws(
+      () => loadConfig({ cwd: "/nonexistent", env: {}, overrides: { privacy: { rules: ["emails"] } } as never }),
+      /emails/,
+    );
+  });
+
+  test("global scope without a salt is refused", () => {
+    // Unsalted global tokens are a rainbow table over your users' emails.
+    assert.throws(
+      () => loadConfig({ cwd: "/nonexistent", env: { SIFT_PRIVACY_SCOPE: "global" } }),
+      /salt/i,
+    );
+  });
+});
+
 describe("loadConfig env surface", () => {
   test("maps every documented env var", () => {
     const cfg = loadConfig({

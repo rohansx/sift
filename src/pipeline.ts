@@ -9,6 +9,8 @@ import { buildFacetReport, type FacetReport } from "./report/model.ts";
 import { exportTheme, type EvalExport, type ExportOptions } from "./export/evals.ts";
 import { systemClock, type Clock, type Embedder, type FacetDef, type Labeler, type Summarizer, type Theme } from "./types.ts";
 import { windowForTrace } from "./window.ts";
+import { Pseudonymizer } from "./privacy/redact.ts";
+import { RedactingSummarizer } from "./privacy/gate.ts";
 
 /**
  * Orchestration.
@@ -282,11 +284,29 @@ export function createPipeline(cfg: SiftConfig, opts: CreatePipelineOptions = {}
   const store = new SiftStore(cfg.dbPath);
   const factoryOpts = opts.requireKey ? { requireKey: true } : {};
   const deps: PipelineDeps = {
-    summarizer: createSummarizer(cfg.llm, factoryOpts),
+    // The pseudonymization gate wraps whatever summarizer was configured, so it
+    // applies identically to a hosted model and a self-hosted one.
+    summarizer: withPrivacyGate(createSummarizer(cfg.llm, factoryOpts), cfg),
     embedder: createEmbedder(cfg.embeddings, factoryOpts),
     labeler: createLabeler(cfg.llm, factoryOpts),
   };
   if (opts.clock) deps.clock = opts.clock;
   if (opts.log) deps.log = opts.log;
   return new Pipeline(store, cfg, deps);
+}
+
+/** Builds the configured Pseudonymizer. Exported so `sift privacy` uses the same one. */
+export function createPseudonymizer(cfg: SiftConfig): Pseudonymizer {
+  const opts: ConstructorParameters<typeof Pseudonymizer>[0] = {
+    mode: cfg.privacy.mode,
+    scope: cfg.privacy.scope,
+  };
+  if (cfg.privacy.salt !== undefined) opts.salt = cfg.privacy.salt;
+  if (cfg.privacy.rules !== undefined) opts.rules = cfg.privacy.rules;
+  return new Pseudonymizer(opts);
+}
+
+function withPrivacyGate(summarizer: Summarizer, cfg: SiftConfig): Summarizer {
+  if (cfg.privacy.mode === "off") return summarizer;
+  return new RedactingSummarizer(summarizer, createPseudonymizer(cfg));
 }

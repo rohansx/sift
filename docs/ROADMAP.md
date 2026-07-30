@@ -23,6 +23,7 @@ fakes (see [TESTING.md](./TESTING.md)).
 | P10 | `src/export/` | Theme → eval cases + scorer | ✅ |
 | P11 | `src/pipeline.ts`, `src/cli.ts` | Orchestration and CLI | ✅ |
 | P12 | `src/examples/` | Demo trace generator + end-to-end proof | ✅ |
+| P13 | `src/privacy/` | Pseudonymization gate in front of the summarizer | ✅ |
 
 ## Phase notes
 
@@ -43,7 +44,6 @@ reader. JSONL OTLP ingestion is enough to demo the whole loop.
 
 ## After v0
 
-- Pseudonymization gate in front of the summarizer (pre-LLM PII rewrite)
 - OTLP/HTTP receiver so sift can be an OTel collector target
 - `sqlite-vec` ANN once registries outgrow brute-force cosine
 - Hierarchical themes (needed past ~100 themes)

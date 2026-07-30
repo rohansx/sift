@@ -43,8 +43,22 @@ Consumes [GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv
 **6. Configurable facets.**
 Chat agents need `goal / outcome / behavior / sentiment`. Batch pipelines have no sentiment. Coding agents need `files-touched / test-outcome`. Facets are per-agent-type config with presets, not a fixed schema.
 
-**7. Local-first.**
+**7. Local-first, with a privacy gate in front of the model.**
 Single SQLite file, embeddings can run locally, summaries can point at any OpenAI-compatible endpoint including your own. Traces are the most PII-dense artifact your company produces. They shouldn't need to leave your infra to be understood.
+
+When summaries *do* go to a hosted model, a pseudonymization pass rewrites identifiers first — emails, phone numbers, Luhn-valid card numbers, IPs, API keys, UUIDs, URL query strings. It's on by default, and you can see exactly what it does before trusting it:
+
+```
+$ sift privacy --otlp ./traces.jsonl
+
+  privacy gate: pseudonymize (scope: trace)
+  7 values in 1 of 1 traces would be replaced before the LLM sees them
+
+  - input: Hi, I'm jane.doe@acme.co and my card 4111111111111111 was charged twice.
+  + input: Hi, I'm <EMAIL_1> and my card <CARD_1> was charged twice.
+```
+
+Tokens are stable *within* a trace, so "the agent replied to a different address than the one that wrote in" survives as a summarizable fact, and reset *between* traces, so two traces from the same person aren't linkable. Your stored traces are never modified — the gate protects the third party, not your own archive.
 
 ## Quickstart
 

@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { ConfigError, loadConfig, type DeepPartial, type SiftConfig } from "../config.ts";
@@ -8,6 +8,9 @@ import { renderDeltaMarkdown, renderThemeMarkdown } from "../report/markdown.ts"
 import { renderDeltaTerminal, renderIssuesList } from "../report/terminal.ts";
 import { EXPORT_FORMATS, renderExport, type ExportFormat } from "../export/evals.ts";
 import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
+import { createPseudonymizer } from "../pipeline.ts";
+import { parseOtlpJsonl } from "../ingest/otlp.ts";
+import { REDACTION_RULES } from "../privacy/redact.ts";
 import { THEME_STATES, type ThemeState } from "../types.ts";
 
 /**
@@ -44,6 +47,7 @@ LIFECYCLE
 
 OTHER
   export        emit a theme as eval cases and a scorer prompt
+  privacy       preview what the pseudonymization gate strips before the LLM
   demo          generate synthetic traces with planted failure modes
   help, version
 
@@ -156,6 +160,8 @@ async function run(command: string, ctx: Ctx): Promise<number> {
   switch (command) {
     case "demo":
       return cmdDemo(ctx);
+    case "privacy":
+      return cmdPrivacy(ctx);
     case "ingest":
       return withPipeline(ctx, cmdIngest);
     case "summarize":
@@ -221,6 +227,73 @@ function cmdDemo(ctx: Ctx): number {
       `next:\n  sift analyze --otlp ${out}\n  sift report\n  sift delta --from v1.2 --to v1.3 --facet behavior\n`,
   );
   return 0;
+}
+
+/**
+ * Shows exactly what leaves the machine. Nobody should have to take a privacy
+ * claim on faith when the tool can just show them the redacted text.
+ */
+function cmdPrivacy(ctx: Ctx): number {
+  const path = typeof ctx.values.otlp === "string" ? ctx.values.otlp : ctx.positionals[0];
+  const gate = createPseudonymizer(ctx.cfg);
+
+  if (!path) {
+    if (ctx.json) {
+      process.stdout.write(`${JSON.stringify({ ...ctx.cfg.privacy, rules: REDACTION_RULES.map((r) => r.name) }, null, 2)}\n`);
+      return 0;
+    }
+    process.stdout.write(`\n  privacy gate: ${ctx.cfg.privacy.mode} (scope: ${ctx.cfg.privacy.scope})\n\n`);
+    for (const rule of REDACTION_RULES) {
+      const active = !ctx.cfg.privacy.rules || ctx.cfg.privacy.rules.includes(rule.name);
+      process.stdout.write(`    ${active ? "on " : "off"}  ${rule.name.padEnd(8)} <${rule.label}>\n`);
+    }
+    process.stdout.write(`\n  point it at traces to preview: sift privacy --otlp ./traces.jsonl\n\n`);
+    return 0;
+  }
+
+  const { traces } = parseOtlpJsonl(readFileSync(path, "utf8"));
+  const totals: Record<string, number> = {};
+  let redactedTraces = 0;
+  const samples: Array<{ id: string; before: string; after: string }> = [];
+
+  for (const trace of traces) {
+    const result = gate.redact(trace.text);
+    if (result.total === 0) continue;
+    redactedTraces++;
+    for (const [rule, n] of Object.entries(result.counts)) totals[rule] = (totals[rule] ?? 0) + n;
+    if (samples.length < 3) samples.push({ id: trace.id, before: trace.text, after: result.text });
+  }
+
+  const total = Object.values(totals).reduce((a, b) => a + b, 0);
+  if (ctx.json) {
+    process.stdout.write(`${JSON.stringify({ traces: traces.length, redactedTraces, total, byRule: totals }, null, 2)}\n`);
+    return 0;
+  }
+
+  process.stdout.write(`\n  privacy gate: ${ctx.cfg.privacy.mode} (scope: ${ctx.cfg.privacy.scope})\n`);
+  process.stdout.write(`  ${total} values in ${redactedTraces} of ${traces.length} traces would be replaced before the LLM sees them\n\n`);
+  for (const [rule, n] of Object.entries(totals).sort((a, b) => b[1] - a[1])) {
+    process.stdout.write(`    ${String(n).padStart(6)}  ${rule}\n`);
+  }
+  if (total === 0) process.stdout.write(`    nothing matched — these traces carry no identifiers the gate recognises\n`);
+
+  for (const sample of samples) {
+    process.stdout.write(`\n  ${sample.id}\n`);
+    for (const line of diffLines(sample.before, sample.after)) process.stdout.write(`    ${line}\n`);
+  }
+  process.stdout.write("\n");
+  return 0;
+}
+
+/** Only the lines the gate actually changed; a full trace dump would bury them. */
+function diffLines(before: string, after: string): string[] {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < b.length && out.length < 8; i++) {
+    if (a[i] !== b[i]) out.push(`- ${a[i]}`, `+ ${b[i]}`);
+  }
+  return out;
 }
 
 function cmdIngest(pipeline: Pipeline, ctx: Ctx): number {

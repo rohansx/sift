@@ -1,7 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -233,6 +233,63 @@ describe("export", () => {
     const r = sift(["export", "SIFT-1", "--format", "yaml"]);
     assert.equal(r.code, 2);
     assert.match(r.stderr, /mastra-scorer/);
+  });
+});
+
+describe("privacy gate", () => {
+  test("with no file it explains what the gate is set to strip", () => {
+    const r = sift(["privacy"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /pseudonymize/);
+    assert.match(r.stdout, /email/);
+    assert.match(r.stdout, /card/);
+  });
+
+  test("previewing real traces shows what would be replaced, before trusting it", () => {
+    const withPii = join(dir, "pii.jsonl");
+    writeFileSync(
+      withPii,
+      JSON.stringify({
+        trace_id: "pii-1",
+        span_id: "s1",
+        name: "chat",
+        start_time: "2026-07-01T10:00:00.000Z",
+        end_time: "2026-07-01T10:00:01.000Z",
+        attributes: {
+          "gen_ai.agent.name": "support-bot",
+          "gen_ai.prompt": "I am jane.doe@example.com, card 4111111111111111",
+          "gen_ai.completion": "thanks, checking",
+        },
+      }),
+    );
+
+    const r = sift(["privacy", "--otlp", withPii]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /email/);
+    assert.match(r.stdout, /card/);
+    // the preview must show the redacted line, not leak the original in the "after"
+    const afterLines = r.stdout.split("\n").filter((l) => l.trimStart().startsWith("+ "));
+    assert.ok(afterLines.length > 0, "expected a redacted sample line");
+    assert.ok(!afterLines.join("\n").includes("jane.doe@example.com"));
+  });
+
+  test("reports cleanly when nothing matches", () => {
+    const r = sift(["privacy", "--otlp", tracesPath]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /nothing matched|0 values/);
+  });
+
+  test("json output is machine readable", () => {
+    const r = sift(["privacy", "--otlp", tracesPath, "--json"]);
+    const parsed = JSON.parse(r.stdout) as { traces: number; total: number };
+    assert.ok(parsed.traces > 0);
+    assert.equal(parsed.total, 0);
+  });
+
+  test("a bad privacy setting is caught at startup", () => {
+    const r = sift(["report"], { env: { SIFT_PRIVACY_SCOPE: "global" } });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /salt/i);
   });
 });
 

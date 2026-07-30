@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { FacetDef } from "./types.ts";
+import { REDACTION_RULES, type RedactionMode, type RedactionScope } from "./privacy/redact.ts";
 
 /**
  * Facet presets and configuration.
@@ -55,6 +56,17 @@ export interface EmbeddingConfig {
   dimensions: number;
 }
 
+export interface PrivacyConfig {
+  /** "pseudonymize" (stable tokens), "mask" (bare labels), or "off" */
+  mode: RedactionMode;
+  /** "trace" restarts tokens per trace; "global" links a value across traces */
+  scope: RedactionScope;
+  /** required for global scope: unsalted global tokens are a rainbow table */
+  salt?: string;
+  /** redaction rules to apply; defaults to all of them */
+  rules?: string[];
+}
+
 export interface SiftConfig {
   dbPath: string;
   /** facet preset name; ignored when `facets` is set */
@@ -79,6 +91,8 @@ export interface SiftConfig {
   autoResolveAfterEmptyWindows: number;
   llm: LlmConfig;
   embeddings: EmbeddingConfig;
+  /** the pre-LLM pseudonymization gate (OVERVIEW.md §3.6) */
+  privacy: PrivacyConfig;
 }
 
 export const DEFAULT_CONFIG: SiftConfig = {
@@ -102,6 +116,12 @@ export const DEFAULT_CONFIG: SiftConfig = {
     baseUrl: "https://api.openai.com",
     model: "text-embedding-3-small",
     dimensions: 1536,
+  },
+  // On by default. Facet summarization ships trace text to a third party, and
+  // opt-in privacy for that is the wrong default for this tool to have.
+  privacy: {
+    mode: "pseudonymize",
+    scope: "trace",
   },
 };
 
@@ -212,6 +232,7 @@ function envConfig(env: Record<string, string | undefined>): DeepPartial<SiftCon
   const out: Record<string, unknown> = {};
   const llm: Record<string, unknown> = {};
   const embeddings: Record<string, unknown> = {};
+  const privacy: Record<string, unknown> = {};
 
   const str = (key: string): string | undefined => {
     const v = env[key];
@@ -245,8 +266,13 @@ function envConfig(env: Record<string, string | undefined>): DeepPartial<SiftCon
   assign(embeddings, "model", str("SIFT_EMBED_MODEL"));
   assign(embeddings, "dimensions", num("SIFT_EMBED_DIMENSIONS"));
 
+  assign(privacy, "mode", str("SIFT_PRIVACY_MODE"));
+  assign(privacy, "scope", str("SIFT_PRIVACY_SCOPE"));
+  assign(privacy, "salt", str("SIFT_PRIVACY_SALT"));
+
   if (Object.keys(llm).length) out.llm = llm;
   if (Object.keys(embeddings).length) out.embeddings = embeddings;
+  if (Object.keys(privacy).length) out.privacy = privacy;
   return out as DeepPartial<SiftConfig>;
 }
 
@@ -261,6 +287,7 @@ function merge(base: SiftConfig, layer: DeepPartial<SiftConfig>): SiftConfig {
     ...stripUndefined(layer as Record<string, unknown>),
     llm: { ...base.llm, ...stripUndefined((layer.llm ?? {}) as Record<string, unknown>) },
     embeddings: { ...base.embeddings, ...stripUndefined((layer.embeddings ?? {}) as Record<string, unknown>) },
+    privacy: { ...base.privacy, ...stripUndefined((layer.privacy ?? {}) as Record<string, unknown>) },
   } as SiftConfig;
 }
 
@@ -306,6 +333,28 @@ export function validateConfig(cfg: SiftConfig): void {
   for (const [key, value, allowed] of providers) {
     if (!allowed.includes(value)) {
       problems.push(`${key} must be one of ${allowed.join(", ")}, got ${JSON.stringify(value)}`);
+    }
+  }
+
+  const privacyModes = ["off", "mask", "pseudonymize"];
+  const privacyScopes = ["trace", "global"];
+  if (!privacyModes.includes(cfg.privacy.mode)) {
+    problems.push(`privacy.mode must be one of ${privacyModes.join(", ")}, got ${JSON.stringify(cfg.privacy.mode)}`);
+  }
+  if (!privacyScopes.includes(cfg.privacy.scope)) {
+    problems.push(`privacy.scope must be one of ${privacyScopes.join(", ")}, got ${JSON.stringify(cfg.privacy.scope)}`);
+  }
+  if (cfg.privacy.scope === "global" && !cfg.privacy.salt) {
+    problems.push(
+      "privacy.scope \"global\" requires privacy.salt (SIFT_PRIVACY_SALT): unsalted global tokens are a rainbow table over your users' identifiers",
+    );
+  }
+  if (cfg.privacy.rules) {
+    const known = new Set(REDACTION_RULES.map((r) => r.name));
+    for (const name of cfg.privacy.rules) {
+      if (!known.has(name)) {
+        problems.push(`unknown redaction rule ${JSON.stringify(name)}; available: ${[...known].join(", ")}`);
+      }
     }
   }
 
