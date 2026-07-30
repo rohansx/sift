@@ -51,9 +51,16 @@ export interface AssignOptions {
 export interface RegistryDeps {
   labeler: Labeler;
   clock?: Clock;
+  /**
+   * The agent whose registry this is. Scope is mandatory rather than optional:
+   * an unscoped registry silently merges two agents' behaviors, and the bug is
+   * invisible until someone acts on a theme that means two things.
+   */
+  agentId: string;
 }
 
 export class ThemeRegistry {
+  readonly agentId: string;
   private store: SiftStore;
   private cfg: SiftConfig;
   private labeler: Labeler;
@@ -64,6 +71,7 @@ export class ThemeRegistry {
     this.cfg = cfg;
     this.labeler = deps.labeler;
     this.clock = deps.clock ?? systemClock;
+    this.agentId = deps.agentId;
   }
 
   private now(): string {
@@ -85,13 +93,20 @@ export class ThemeRegistry {
       throw new Error(`summary ${summary.traceId}/${summary.facet} has no embedding; embed before assigning`);
     }
 
-    const themes = this.store.themesForFacet(summary.facet);
+    const themes = this.store.themesForFacet(this.agentId, summary.facet);
     opts.onCompare?.(themes.length);
     const hit = nearest(embedding, themes, (t) => t.centroid);
     const similarity = hit?.similarity ?? 0;
 
     if (!hit || similarity < this.cfg.assignThreshold) {
-      this.store.insertAssignment({ traceId: summary.traceId, facet: summary.facet, themeId: null, similarity, window });
+      this.store.insertAssignment({
+        traceId: summary.traceId,
+        agentId: this.agentId,
+        facet: summary.facet,
+        themeId: null,
+        similarity,
+        window,
+      });
       return { traceId: summary.traceId, facet: summary.facet, themeId: null, similarity, window };
     }
 
@@ -112,6 +127,7 @@ export class ThemeRegistry {
       this.store.updateTheme(theme);
       this.store.insertAssignment({
         traceId: summary.traceId,
+        agentId: this.agentId,
         facet: summary.facet,
         themeId: theme.id,
         similarity,
@@ -136,7 +152,7 @@ export class ThemeRegistry {
    * a late backfill still lands in the window it belongs to.
    */
   assignPending(facet: string, opts: AssignOptions = {}): AssignPendingResult {
-    const pending = this.store.summariesForFacet(facet, { unassignedOnly: true });
+    const pending = this.store.summariesForFacet(facet, { unassignedOnly: true, agentId: this.agentId });
     const transitions: StateTransition[] = [];
     let assigned = 0;
     let residual = 0;
@@ -206,12 +222,12 @@ export class ThemeRegistry {
     const k = this.cfg.autoResolveAfterEmptyWindows;
     if (k <= 0) return [];
 
-    const windows = this.store.windowsForFacet(facet);
+    const windows = this.store.windowsForFacet(this.agentId, facet);
     if (windows.length < k + 1) return []; // not enough history to judge silence
     const recent = windows.slice(-k);
 
     const transitions: StateTransition[] = [];
-    for (const theme of this.store.themesForFacet(facet, ["new", "active", "regressed"])) {
+    for (const theme of this.store.themesForFacet(this.agentId, facet, ["new", "active", "regressed"])) {
       const seen = recent.some((w) => this.store.themeCountInWindow(theme.id, facet, w) > 0);
       if (seen) continue;
       const from = theme.state;
@@ -228,7 +244,7 @@ export class ThemeRegistry {
 
   /** Is the residual pile large enough to be worth a discovery pass? */
   needsRediscovery(facet: string, window: string): boolean {
-    return this.store.residualShare(facet, window) > this.cfg.rediscoverResidualShare;
+    return this.store.residualShare(this.agentId, facet, window) > this.cfg.rediscoverResidualShare;
   }
 
   /**
@@ -239,7 +255,7 @@ export class ThemeRegistry {
    * wrong. Existing themes are never read, re-fitted or renamed here.
    */
   async discover(facet: string, opts: { minClusterSize?: number } = {}): Promise<Theme[]> {
-    const pool = this.store.summariesForFacet(facet, { unassignedOnly: true });
+    const pool = this.store.summariesForFacet(facet, { unassignedOnly: true, agentId: this.agentId });
     const minClusterSize = opts.minClusterSize ?? this.cfg.minClusterSize;
     if (pool.length < minClusterSize) return [];
 
@@ -266,6 +282,7 @@ export class ThemeRegistry {
       const now = this.now();
       const theme: Theme = {
         id: this.store.nextThemeId(),
+        agentId: this.agentId,
         facet,
         label,
         description,
@@ -290,6 +307,7 @@ export class ThemeRegistry {
           const trace = this.store.getTrace(member.traceId);
           this.store.insertAssignment({
             traceId: member.traceId,
+            agentId: this.agentId,
             facet,
             themeId: theme.id,
             similarity,
@@ -309,6 +327,7 @@ export class ThemeRegistry {
         if (!trace) continue;
         this.store.insertAssignment({
           traceId: summary.traceId,
+          agentId: this.agentId,
           facet,
           themeId: null,
           similarity: bestSimilarity(summary.embedding!, created),

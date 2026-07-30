@@ -33,6 +33,7 @@ export interface ThemeRow {
 }
 
 export interface FacetReport {
+  agentId: string;
   facet: string;
   /** the window being reported on; undefined when there are no assignments yet */
   window?: string;
@@ -46,14 +47,15 @@ export interface FacetReport {
 }
 
 export interface BuildReportOptions {
+  agentId: string;
   facet: string;
   /** defaults to the most recent window */
   window?: string;
 }
 
 export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildReportOptions): FacetReport {
-  const stats = store.themeCountsByWindow(opts.facet);
-  const series = themeSeries(store, opts.facet);
+  const stats = store.themeCountsByWindow(opts.agentId, opts.facet);
+  const series = themeSeries(store, opts.agentId, opts.facet);
   const windows = stats.windows;
 
   const window = opts.window ?? windows[windows.length - 1];
@@ -68,7 +70,7 @@ export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildR
   // Every theme in the registry appears, including ones with no traffic this
   // window: a theme that has gone quiet is information, and omitting it would
   // make a resolved-then-forgotten issue invisible.
-  for (const theme of store.themesForFacet(opts.facet)) {
+  for (const theme of store.themesForFacet(opts.agentId, opts.facet)) {
     const count = counts.get(theme.id) ?? 0;
     const share = total === 0 ? 0 : count / total;
     const history = (series.byTheme.get(theme.id) ?? []).map((p) => p.share);
@@ -99,6 +101,7 @@ export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildR
   rows.sort((a, b) => b.share - a.share || b.memberCount - a.memberCount || a.id.localeCompare(b.id));
 
   const report: FacetReport = {
+    agentId: opts.agentId,
     facet: opts.facet,
     windows,
     totalAssignments: total,

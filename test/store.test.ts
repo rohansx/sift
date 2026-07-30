@@ -22,6 +22,7 @@ function trace(over: Partial<Trace> = {}): Trace {
 function theme(over: Partial<Theme> = {}): Theme {
   return {
     id: "SIFT-1",
+    agentId: "support-bot",
     facet: "behavior",
     label: "tool retry loop on search_kb",
     description: "agent retries the search tool after a timeout",
@@ -197,8 +198,8 @@ describe("facet summaries", () => {
         store.insertSummary({ traceId: id, facet: "behavior", summary: id, embedding: [1, 0] });
       }
       store.insertTheme(theme());
-      store.insertAssignment({ traceId: "assigned", facet: "behavior", themeId: "SIFT-1", similarity: 0.9, window: "v1.2" });
-      store.insertAssignment({ traceId: "residual", facet: "behavior", themeId: null, similarity: 0.1, window: "v1.2" });
+      store.insertAssignment({ traceId: "assigned", agentId: "support-bot", facet: "behavior", themeId: "SIFT-1", similarity: 0.9, window: "v1.2" });
+      store.insertAssignment({ traceId: "residual", agentId: "support-bot", facet: "behavior", themeId: null, similarity: 0.1, window: "v1.2" });
 
       const ids = store.summariesForFacet("behavior", { unassignedOnly: true }).map((s) => s.traceId).sort();
       assert.deepEqual(ids, ["residual", "untouched"]);
@@ -290,8 +291,8 @@ describe("themes", () => {
       store.insertTheme(theme({ id: "SIFT-2", facet: "behavior", state: "muted" }));
       store.insertTheme(theme({ id: "SIFT-3", facet: "goal", state: "active" }));
 
-      assert.deepEqual(store.themesForFacet("behavior").map((t) => t.id), ["SIFT-1", "SIFT-2"]);
-      assert.deepEqual(store.themesForFacet("behavior", ["active"]).map((t) => t.id), ["SIFT-1"]);
+      assert.deepEqual(store.themesForFacet("support-bot", "behavior").map((t) => t.id), ["SIFT-1", "SIFT-2"]);
+      assert.deepEqual(store.themesForFacet("support-bot", "behavior", ["active"]).map((t) => t.id), ["SIFT-1"]);
       assert.deepEqual(store.allThemes().length, 3);
     });
   });
@@ -320,7 +321,7 @@ describe("assignments and windows", () => {
     ];
     for (const [id, themeId, window] of rows) {
       store.insertTrace(trace({ id, version: window }));
-      store.insertAssignment({ traceId: id, facet: "behavior", themeId, similarity: themeId ? 0.9 : 0.1, window });
+      store.insertAssignment({ traceId: id, agentId: "support-bot", facet: "behavior", themeId, similarity: themeId ? 0.9 : 0.1, window });
     }
   }
 
@@ -328,9 +329,9 @@ describe("assignments and windows", () => {
     withTempStore((store) => {
       store.insertTrace(trace());
       store.insertTheme(theme());
-      store.insertAssignment({ traceId: "t1", facet: "behavior", themeId: null, similarity: 0.2, window: "w1" });
-      store.insertAssignment({ traceId: "t1", facet: "behavior", themeId: "SIFT-1", similarity: 0.8, window: "w1" });
-      assert.equal(store.residualShare("behavior", "w1"), 0);
+      store.insertAssignment({ traceId: "t1", agentId: "support-bot", facet: "behavior", themeId: null, similarity: 0.2, window: "w1" });
+      store.insertAssignment({ traceId: "t1", agentId: "support-bot", facet: "behavior", themeId: "SIFT-1", similarity: 0.8, window: "w1" });
+      assert.equal(store.residualShare("support-bot", "behavior", "w1"), 0);
       assert.equal(store.countAssignments("behavior"), 1);
     });
   });
@@ -338,19 +339,19 @@ describe("assignments and windows", () => {
   test("residual share is residuals over all assignments in the window", () => {
     withTempStore((store) => {
       seed(store);
-      assert.equal(store.residualShare("behavior", "v1.2"), 0.25);
-      assert.equal(store.residualShare("behavior", "v1.3"), 0.5);
+      assert.equal(store.residualShare("support-bot", "behavior", "v1.2"), 0.25);
+      assert.equal(store.residualShare("support-bot", "behavior", "v1.3"), 0.5);
     });
   });
 
   test("residual share of an empty window is 0, not NaN", () => {
-    withTempStore((store) => assert.equal(store.residualShare("behavior", "never"), 0));
+    withTempStore((store) => assert.equal(store.residualShare("support-bot", "behavior", "never"), 0));
   });
 
   test("counts per theme per window, with window totals for share math", () => {
     withTempStore((store) => {
       seed(store);
-      const stats = store.themeCountsByWindow("behavior");
+      const stats = store.themeCountsByWindow("support-bot", "behavior");
       assert.deepEqual(stats.windows, ["v1.2", "v1.3"]);
       assert.equal(stats.totals.get("v1.2"), 4);
       assert.equal(stats.counts.get("v1.2")!.get("SIFT-1"), 2);
@@ -362,7 +363,7 @@ describe("assignments and windows", () => {
   test("window totals include residuals, so shares add to less than 1 when discovery is behind", () => {
     withTempStore((store) => {
       seed(store);
-      const stats = store.themeCountsByWindow("behavior");
+      const stats = store.themeCountsByWindow("support-bot", "behavior");
       const assignedShare = [...stats.counts.get("v1.2")!.values()].reduce((a, b) => a + b, 0) / stats.totals.get("v1.2")!;
       assert.equal(assignedShare, 0.75);
     });
@@ -371,7 +372,7 @@ describe("assignments and windows", () => {
   test("lists windows in order for sparklines", () => {
     withTempStore((store) => {
       seed(store);
-      assert.deepEqual(store.windowsForFacet("behavior"), ["v1.2", "v1.3"]);
+      assert.deepEqual(store.windowsForFacet("support-bot", "behavior"), ["v1.2", "v1.3"]);
     });
   });
 
@@ -380,8 +381,8 @@ describe("assignments and windows", () => {
       store.insertTheme(theme());
       store.insertTrace(trace({ id: "low" }));
       store.insertTrace(trace({ id: "high" }));
-      store.insertAssignment({ traceId: "low", facet: "behavior", themeId: "SIFT-1", similarity: 0.5, window: "w" });
-      store.insertAssignment({ traceId: "high", facet: "behavior", themeId: "SIFT-1", similarity: 0.95, window: "w" });
+      store.insertAssignment({ traceId: "low", agentId: "support-bot", facet: "behavior", themeId: "SIFT-1", similarity: 0.5, window: "w" });
+      store.insertAssignment({ traceId: "high", agentId: "support-bot", facet: "behavior", themeId: "SIFT-1", similarity: 0.95, window: "w" });
       assert.deepEqual(store.tracesForTheme("SIFT-1").map((t) => t.id), ["high", "low"]);
     });
   });

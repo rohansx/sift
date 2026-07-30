@@ -24,6 +24,7 @@ fakes (see [TESTING.md](./TESTING.md)).
 | P11 | `src/pipeline.ts`, `src/cli.ts` | Orchestration and CLI | ✅ |
 | P12 | `src/examples/` | Demo trace generator + end-to-end proof | ✅ |
 | P13 | `src/privacy/` | Pseudonymization gate in front of the summarizer | ✅ |
+| P14 | across | Per-agent registry scoping, `--since` time filtering | ✅ |
 
 ## Phase notes
 

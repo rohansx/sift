@@ -10,7 +10,7 @@ import type { Assignment, FacetSummary, Theme, ThemeState, Trace } from "../type
  * documented upgrade path when a registry outgrows it.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS traces (
@@ -33,6 +33,7 @@ const SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS themes (
     id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
     facet TEXT NOT NULL,
     label TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
@@ -49,6 +50,7 @@ const SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS assignments (
     trace_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     facet TEXT NOT NULL,
     theme_id TEXT,
     similarity REAL NOT NULL,
@@ -59,10 +61,10 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
   CREATE INDEX IF NOT EXISTS idx_assignments_theme ON assignments(theme_id, window);
-  CREATE INDEX IF NOT EXISTS idx_assignments_facet_window ON assignments(facet, window);
+  CREATE INDEX IF NOT EXISTS idx_assignments_scope ON assignments(agent_id, facet, window);
   CREATE INDEX IF NOT EXISTS idx_traces_agent ON traces(agent_id, started_at);
   CREATE INDEX IF NOT EXISTS idx_summaries_facet ON facet_summaries(facet);
-  CREATE INDEX IF NOT EXISTS idx_themes_facet ON themes(facet, state);
+  CREATE INDEX IF NOT EXISTS idx_themes_scope ON themes(agent_id, facet, state);
 `;
 
 export interface ListTracesOptions {
@@ -108,8 +110,38 @@ export class SiftStore {
         `database ${this.path} was written by a newer version of sift (schema ${version}, this build understands ${SCHEMA_VERSION})`,
       );
     }
-    // Future migrations step from `version` up to SCHEMA_VERSION here.
+    if (version < 2) this.migrateToAgentScoping();
     if (version < SCHEMA_VERSION) this.setMeta("schema_version", String(SCHEMA_VERSION));
+  }
+
+  /**
+   * v1 -> v2: themes and assignments became agent-scoped. The columns are added
+   * by the CREATE TABLE above for new databases; for an existing one they may
+   * already exist (sqlite has no IF NOT EXISTS for columns, so this tolerates
+   * the duplicate) and are backfilled from each assignment's trace.
+   */
+  private migrateToAgentScoping(): void {
+    for (const stmt of [
+      "ALTER TABLE themes ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE assignments ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+    ]) {
+      try {
+        this.db.exec(stmt);
+      } catch {
+        // column already present: this database was created by the current schema
+      }
+    }
+    this.db.exec(`
+      UPDATE assignments SET agent_id = COALESCE(
+        (SELECT t.agent_id FROM traces t WHERE t.id = assignments.trace_id), ''
+      ) WHERE agent_id = '';
+    `);
+    this.db.exec(`
+      UPDATE themes SET agent_id = COALESCE((
+        SELECT a.agent_id FROM assignments a
+        WHERE a.theme_id = themes.id AND a.agent_id != '' LIMIT 1
+      ), '') WHERE agent_id = '';
+    `);
   }
 
   schemaVersion(): number {
@@ -190,18 +222,34 @@ export class SiftStore {
    * dies halfway through a facet set would otherwise leave traces permanently
    * half-summarized and invisible to every later run.
    */
-  tracesNeedingSummaries(facets: string[], limit = 500): Trace[] {
+  tracesNeedingSummaries(
+    facets: string[],
+    opts: { limit?: number; since?: string; agentId?: string } = {},
+  ): Trace[] {
     if (facets.length === 0) return [];
     const placeholders = facets.map(() => "?").join(", ");
+    const params: Array<string | number> = [...facets, facets.length];
+
+    let extra = "";
+    if (opts.since) {
+      extra += " AND t.started_at >= ?";
+      params.push(opts.since);
+    }
+    if (opts.agentId) {
+      extra += " AND t.agent_id = ?";
+      params.push(opts.agentId);
+    }
+    params.push(Math.floor(opts.limit ?? 500));
+
     const sql = `
       SELECT t.* FROM traces t
       WHERE (
         SELECT COUNT(*) FROM facet_summaries fs
         WHERE fs.trace_id = t.id AND fs.facet IN (${placeholders})
-      ) < ?
+      ) < ?${extra}
       ORDER BY t.started_at, t.id
       LIMIT ?`;
-    return (this.db.prepare(sql).all(...facets, facets.length, Math.floor(limit)) as Row[]).map(rowToTrace);
+    return (this.db.prepare(sql).all(...params) as Row[]).map(rowToTrace);
   }
 
   /* ---------- summaries ---------- */
@@ -245,14 +293,25 @@ export class SiftStore {
    * Embedded summaries for one facet. `unassignedOnly` means the residual
    * pile plus anything never assigned — exactly the pool re-discovery runs on.
    */
-  summariesForFacet(facet: string, opts: { unassignedOnly?: boolean } = {}): FacetSummary[] {
+  summariesForFacet(
+    facet: string,
+    opts: { unassignedOnly?: boolean; agentId?: string } = {},
+  ): FacetSummary[] {
+    const agentClause = opts.agentId ? "AND t.agent_id = ?" : "";
+    const params: string[] = [facet];
+    if (opts.agentId) params.push(opts.agentId);
+
     const sql = opts.unassignedOnly
       ? `SELECT fs.* FROM facet_summaries fs
+         JOIN traces t ON t.id = fs.trace_id
          LEFT JOIN assignments a ON a.trace_id = fs.trace_id AND a.facet = fs.facet
-         WHERE fs.facet = ? AND fs.embedding IS NOT NULL AND (a.trace_id IS NULL OR a.theme_id IS NULL)
+         WHERE fs.facet = ? ${agentClause} AND fs.embedding IS NOT NULL AND (a.trace_id IS NULL OR a.theme_id IS NULL)
          ORDER BY fs.trace_id`
-      : `SELECT * FROM facet_summaries WHERE facet = ? AND embedding IS NOT NULL ORDER BY trace_id`;
-    return (this.db.prepare(sql).all(facet) as Row[]).map(rowToSummary);
+      : `SELECT fs.* FROM facet_summaries fs
+         JOIN traces t ON t.id = fs.trace_id
+         WHERE fs.facet = ? ${agentClause} AND fs.embedding IS NOT NULL
+         ORDER BY fs.trace_id`;
+    return (this.db.prepare(sql).all(...params) as Row[]).map(rowToSummary);
   }
 
   facetsWithSummaries(): string[] {
@@ -280,12 +339,13 @@ export class SiftStore {
   insertTheme(t: Theme): void {
     this.db
       .prepare(
-        `INSERT INTO themes (id, facet, label, description, state, centroid, member_count,
+        `INSERT INTO themes (id, agent_id, facet, label, description, state, centroid, member_count,
                              exemplar_trace_ids, created_at, updated_at, first_window, last_seen_window, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         t.id,
+        t.agentId,
         t.facet,
         t.label,
         t.description,
@@ -335,44 +395,62 @@ export class SiftStore {
     return r ? rowToTheme(r) : null;
   }
 
-  themesForFacet(facet: string, states?: ThemeState[]): Theme[] {
-    const all = (this.db.prepare(`SELECT * FROM themes WHERE facet = ? ORDER BY id`).all(facet) as Row[]).map(
-      rowToTheme,
-    );
+  /** Themes for one agent's facet. Scope is not optional: mixing agents is a bug. */
+  themesForFacet(agentId: string, facet: string, states?: ThemeState[]): Theme[] {
+    const all = (
+      this.db.prepare(`SELECT * FROM themes WHERE agent_id = ? AND facet = ? ORDER BY id`).all(agentId, facet) as Row[]
+    ).map(rowToTheme);
     return states ? all.filter((t) => states.includes(t.state)) : all;
   }
 
-  allThemes(): Theme[] {
-    return (
-      this.db.prepare(`SELECT * FROM themes ORDER BY member_count DESC, id`).all() as Row[]
-    ).map(rowToTheme);
+  /** Every theme in the database, biggest first. Optionally narrowed to one agent. */
+  allThemes(agentId?: string): Theme[] {
+    const sql = agentId
+      ? `SELECT * FROM themes WHERE agent_id = ? ORDER BY member_count DESC, id`
+      : `SELECT * FROM themes ORDER BY member_count DESC, id`;
+    return (this.db.prepare(sql).all(...(agentId ? [agentId] : [])) as Row[]).map(rowToTheme);
   }
 
   /* ---------- assignments & window stats ---------- */
 
   insertAssignment(a: Assignment): void {
     this.db
-      .prepare(`INSERT OR REPLACE INTO assignments (trace_id, facet, theme_id, similarity, window) VALUES (?, ?, ?, ?, ?)`)
-      .run(a.traceId, a.facet, a.themeId, a.similarity, a.window);
+      .prepare(
+        `INSERT OR REPLACE INTO assignments (trace_id, agent_id, facet, theme_id, similarity, window)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(a.traceId, a.agentId, a.facet, a.themeId, a.similarity, a.window);
   }
 
-  countAssignments(facet?: string): number {
-    const sql = facet ? `SELECT COUNT(*) c FROM assignments WHERE facet = ?` : `SELECT COUNT(*) c FROM assignments`;
-    return (this.db.prepare(sql).get(...(facet ? [facet] : [])) as { c: number }).c;
+  countAssignments(facet?: string, agentId?: string): number {
+    const where: string[] = [];
+    const params: string[] = [];
+    if (facet) {
+      where.push("facet = ?");
+      params.push(facet);
+    }
+    if (agentId) {
+      where.push("agent_id = ?");
+      params.push(agentId);
+    }
+    const sql = `SELECT COUNT(*) c FROM assignments${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`;
+    return (this.db.prepare(sql).get(...params) as { c: number }).c;
   }
 
   /** Fraction of a window's assignments that landed in the residual pile. */
-  residualShare(facet: string, window: string): number {
+  residualShare(agentId: string, facet: string, window: string): number {
     const total = (
-      this.db.prepare(`SELECT COUNT(*) c FROM assignments WHERE facet = ? AND window = ?`).get(facet, window) as {
-        c: number;
-      }
+      this.db
+        .prepare(`SELECT COUNT(*) c FROM assignments WHERE agent_id = ? AND facet = ? AND window = ?`)
+        .get(agentId, facet, window) as { c: number }
     ).c;
     if (total === 0) return 0;
     const residual = (
       this.db
-        .prepare(`SELECT COUNT(*) c FROM assignments WHERE facet = ? AND window = ? AND theme_id IS NULL`)
-        .get(facet, window) as { c: number }
+        .prepare(
+          `SELECT COUNT(*) c FROM assignments WHERE agent_id = ? AND facet = ? AND window = ? AND theme_id IS NULL`,
+        )
+        .get(agentId, facet, window) as { c: number }
     ).c;
     return residual / total;
   }
@@ -382,12 +460,13 @@ export class SiftStore {
    * when discovery is behind, theme shares should visibly fail to add to 1
    * rather than quietly renormalizing the gap away.
    */
-  themeCountsByWindow(facet: string): WindowCounts {
+  themeCountsByWindow(agentId: string, facet: string): WindowCounts {
     const rows = this.db
       .prepare(
-        `SELECT window, theme_id, COUNT(*) c FROM assignments WHERE facet = ? GROUP BY window, theme_id ORDER BY window`,
+        `SELECT window, theme_id, COUNT(*) c FROM assignments
+         WHERE agent_id = ? AND facet = ? GROUP BY window, theme_id ORDER BY window`,
       )
-      .all(facet) as Array<{ window: string; theme_id: string | null; c: number }>;
+      .all(agentId, facet) as Array<{ window: string; theme_id: string | null; c: number }>;
 
     const counts = new Map<string, Map<string, number>>();
     const totals = new Map<string, number>();
@@ -403,11 +482,11 @@ export class SiftStore {
     return { windows: [...totals.keys()].sort(), counts, totals, residuals };
   }
 
-  windowsForFacet(facet: string): string[] {
+  windowsForFacet(agentId: string, facet: string): string[] {
     return (
-      this.db.prepare(`SELECT DISTINCT window w FROM assignments WHERE facet = ? ORDER BY w`).all(facet) as Array<{
-        w: string;
-      }>
+      this.db
+        .prepare(`SELECT DISTINCT window w FROM assignments WHERE agent_id = ? AND facet = ? ORDER BY w`)
+        .all(agentId, facet) as Array<{ w: string }>
     ).map((r) => r.w);
   }
 
@@ -474,6 +553,7 @@ function rowToSummary(r: Row): FacetSummary {
 function rowToTheme(r: Row): Theme {
   const t: Theme = {
     id: r.id as string,
+    agentId: (r.agent_id as string) ?? "",
     facet: r.facet as string,
     label: r.label as string,
     description: r.description as string,

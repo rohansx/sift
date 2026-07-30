@@ -56,6 +56,13 @@ export const THEME_STATES: readonly ThemeState[] = ["new", "active", "regressed"
 export interface Theme {
   /** stable, human-pasteable, never reused: "SIFT-14" */
   id: string;
+  /**
+   * The agent this theme belongs to. A registry is scoped per agent: a coding
+   * agent's "behavior" vocabulary and a support bot's are not the same thing,
+   * and sharing a registry between them merges two products into one
+   * meaningless issues list.
+   */
+  agentId: string;
   facet: string;
   label: string;
   description: string;
@@ -77,6 +84,8 @@ export interface Theme {
 
 export interface Assignment {
   traceId: string;
+  /** denormalized from the trace so window stats never need a join */
+  agentId: string;
   facet: string;
   /** null = residual pile: nothing in the registry was close enough */
   themeId: string | null;

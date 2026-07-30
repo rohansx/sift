@@ -9,6 +9,7 @@ import { StubLabeler } from "../src/testing/fakes.ts";
 import type { Clock, FacetSummary, Theme, Trace } from "../src/types.ts";
 
 const FACET = "behavior";
+const AGENT = "support-bot";
 
 function fixedClock(iso = "2026-07-30T12:00:00.000Z"): Clock {
   return () => new Date(iso);
@@ -27,7 +28,7 @@ interface Harness {
 function harness(overrides: Partial<SiftConfig> = {}, clock: Clock = fixedClock()): Harness {
   const store = new SiftStore(":memory:");
   const cfg: SiftConfig = { ...DEFAULT_CONFIG, minClusterSize: 3, ...overrides };
-  const registry = new ThemeRegistry(store, cfg, { labeler: new StubLabeler(), clock });
+  const registry = new ThemeRegistry(store, cfg, { labeler: new StubLabeler(), clock, agentId: AGENT });
 
   return {
     store,
@@ -50,6 +51,7 @@ function harness(overrides: Partial<SiftConfig> = {}, clock: Clock = fixedClock(
     plant(over = {}) {
       const t: Theme = {
         id: over.id ?? store.nextThemeId(),
+        agentId: AGENT,
         facet: FACET,
         label: "planted theme",
         description: "",
@@ -88,7 +90,7 @@ describe("assignment", () => {
     const result = h.registry.assign(s, "v1.0");
     assert.equal(result.themeId, null);
     // the residual row still records how close it got: useful for tuning τ
-    assert.equal(h.store.residualShare(FACET, "v1.0"), 1);
+    assert.equal(h.store.residualShare(AGENT, FACET, "v1.0"), 1);
     assert.ok(Math.abs(result.similarity) < 1e-9);
   });
 
@@ -153,7 +155,7 @@ describe("assignment", () => {
     const summary = h.registry.assignPending(FACET);
     assert.equal(summary.assigned, 3);
     assert.equal(summary.residual, 0);
-    assert.deepEqual(h.store.windowsForFacet(FACET), ["2026-06-05", "v1.2", "v1.3"]);
+    assert.deepEqual(h.store.windowsForFacet(AGENT, FACET), ["2026-06-05", "v1.2", "v1.3"]);
   });
 
   test("assignPending skips traces that are already assigned", () => {
@@ -267,7 +269,7 @@ describe("auto-resolve sweep", () => {
       for (let i = 0; i < count; i++) {
         const id = `${themeId}-${window}-${n++}`;
         h.seed(id, "x", [1, 0, 0], { version: window });
-        h.store.insertAssignment({ traceId: id, facet: FACET, themeId, similarity: 0.9, window });
+        h.store.insertAssignment({ agentId: AGENT, traceId: id, facet: FACET, themeId, similarity: 0.9, window });
       }
     }
   }
@@ -277,7 +279,7 @@ describe("auto-resolve sweep", () => {
     h.plant({ id: "SIFT-1", state: "active" });
     seedWindows(h, "SIFT-1", [["v1", 5]]);
     // three later windows with nothing
-    for (const w of ["v2", "v3", "v4"]) h.store.insertAssignment({ traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
+    for (const w of ["v2", "v3", "v4"]) h.store.insertAssignment({ agentId: AGENT, traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
 
     assert.deepEqual(h.registry.sweepAutoResolve(FACET), []);
     assert.equal(h.store.getTheme("SIFT-1")!.state, "active");
@@ -287,7 +289,7 @@ describe("auto-resolve sweep", () => {
     const h = harness({ autoResolveAfterEmptyWindows: 2 });
     h.plant({ id: "SIFT-1", state: "active" });
     seedWindows(h, "SIFT-1", [["v1", 5]]);
-    for (const w of ["v2", "v3"]) h.store.insertAssignment({ traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
+    for (const w of ["v2", "v3"]) h.store.insertAssignment({ agentId: AGENT, traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
 
     const transitions = h.registry.sweepAutoResolve(FACET);
     assert.deepEqual(transitions, [{ themeId: "SIFT-1", from: "active", to: "resolved" }]);
@@ -300,7 +302,7 @@ describe("auto-resolve sweep", () => {
     const h = harness({ autoResolveAfterEmptyWindows: 2 });
     h.plant({ id: "SIFT-1", state: "active" });
     seedWindows(h, "SIFT-1", [["v1", 3], ["v3", 1]]);
-    h.store.insertAssignment({ traceId: "filler-v2", facet: FACET, themeId: null, similarity: 0, window: "v2" });
+    h.store.insertAssignment({ agentId: AGENT, traceId: "filler-v2", facet: FACET, themeId: null, similarity: 0, window: "v2" });
 
     assert.deepEqual(h.registry.sweepAutoResolve(FACET), []);
     assert.equal(h.store.getTheme("SIFT-1")!.state, "active");
@@ -310,7 +312,7 @@ describe("auto-resolve sweep", () => {
     const h = harness({ autoResolveAfterEmptyWindows: 1 });
     h.plant({ id: "SIFT-1", state: "muted" });
     h.plant({ id: "SIFT-2", state: "resolved" });
-    for (const w of ["v1", "v2"]) h.store.insertAssignment({ traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
+    for (const w of ["v1", "v2"]) h.store.insertAssignment({ agentId: AGENT, traceId: `filler-${w}`, facet: FACET, themeId: null, similarity: 0, window: w });
     assert.deepEqual(h.registry.sweepAutoResolve(FACET), []);
   });
 
@@ -399,7 +401,7 @@ describe("discovery", () => {
 
     const residual = h.store.summariesForFacet(FACET, { unassignedOnly: true }).map((s) => s.traceId).sort();
     assert.deepEqual(residual, ["odd-0", "odd-1"]);
-    assert.ok(h.store.residualShare(FACET, "v1") > 0, "residual traces must still count toward the share");
+    assert.ok(h.store.residualShare(AGENT, FACET, "v1") > 0, "residual traces must still count toward the share");
   });
 
   test("exemplars are the members nearest the centroid, capped at maxExemplars", async () => {
@@ -482,16 +484,16 @@ describe("residual pressure", () => {
   test("needsRediscovery tracks the configured share", () => {
     const h = harness({ rediscoverResidualShare: 0.08 });
     for (let i = 0; i < 20; i++) {
-      h.store.insertAssignment({ traceId: `ok-${i}`, facet: FACET, themeId: null, similarity: 0, window: "w" });
+      h.store.insertAssignment({ agentId: AGENT, traceId: `ok-${i}`, facet: FACET, themeId: null, similarity: 0, window: "w" });
     }
     assert.equal(h.registry.needsRediscovery(FACET, "w"), true);
 
     const h2 = harness({ rediscoverResidualShare: 0.5 });
     h2.plant({ id: "SIFT-1" });
     for (let i = 0; i < 9; i++) {
-      h2.store.insertAssignment({ traceId: `ok-${i}`, facet: FACET, themeId: "SIFT-1", similarity: 0.9, window: "w" });
+      h2.store.insertAssignment({ agentId: AGENT, traceId: `ok-${i}`, facet: FACET, themeId: "SIFT-1", similarity: 0.9, window: "w" });
     }
-    h2.store.insertAssignment({ traceId: "res", facet: FACET, themeId: null, similarity: 0, window: "w" });
+    h2.store.insertAssignment({ agentId: AGENT, traceId: "res", facet: FACET, themeId: null, similarity: 0, window: "w" });
     assert.equal(h2.registry.needsRediscovery(FACET, "w"), false);
   });
 
@@ -507,7 +509,7 @@ describe("exemplar maintenance", () => {
     h.plant({ id: "SIFT-1", exemplarTraceIds: [] });
     for (const [id, sim] of [["low", 0.71], ["best", 0.99], ["mid", 0.85]] as const) {
       h.seed(id, "x", [1, 0, 0]);
-      h.store.insertAssignment({ traceId: id, facet: FACET, themeId: "SIFT-1", similarity: sim, window: "w" });
+      h.store.insertAssignment({ agentId: AGENT, traceId: id, facet: FACET, themeId: "SIFT-1", similarity: sim, window: "w" });
     }
     h.registry.refreshExemplars("SIFT-1");
     assert.deepEqual(h.store.getTheme("SIFT-1")!.exemplarTraceIds, ["best", "mid"]);

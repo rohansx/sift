@@ -236,6 +236,95 @@ describe("export", () => {
   });
 });
 
+describe("several agents in one database", () => {
+  let multiDb: string;
+  let multiTraces: string;
+
+  test("setup: ingest two agents", () => {
+    multiDb = join(dir, "multi.db");
+    multiTraces = join(dir, "multi.jsonl");
+
+    const lines: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      for (const [agent, prompt, tool] of [
+        ["support-bot", "where is my refund for the order", "check_policy"],
+        ["coding-agent", "add a retry to the upload function", "edit_file"],
+      ] as const) {
+        lines.push(
+          JSON.stringify({
+            trace_id: `${agent}-${i}`,
+            span_id: "s1",
+            name: "chat",
+            start_time: "2026-07-01T10:00:00.000Z",
+            end_time: "2026-07-01T10:00:01.000Z",
+            attributes: {
+              "gen_ai.agent.name": agent,
+              "service.version": "v1",
+              "gen_ai.prompt": prompt,
+              "gen_ai.tool.name": tool,
+              "gen_ai.completion": "done",
+            },
+          }),
+        );
+      }
+    }
+    writeFileSync(multiTraces, lines.join("\n"));
+
+    const r = sift(["analyze", "--otlp", multiTraces, "--db", multiDb]);
+    assert.equal(r.code, 0, r.stderr);
+  });
+
+  test("themes are labelled with the agent they belong to", () => {
+    const r = sift(["themes", "--db", multiDb]);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /support-bot/);
+    assert.match(r.stdout, /coding-agent/);
+  });
+
+  test("no theme is shared between the two agents", () => {
+    const themes = JSON.parse(sift(["themes", "--json", "--db", multiDb]).stdout) as Array<{ id: string; agentId: string }>;
+    const byAgent = new Map<string, Set<string>>();
+    for (const t of themes) {
+      if (!byAgent.has(t.agentId)) byAgent.set(t.agentId, new Set());
+      byAgent.get(t.agentId)!.add(t.id);
+    }
+    assert.equal(byAgent.size, 2);
+    const [a, b] = [...byAgent.values()];
+    for (const id of a!) assert.ok(!b!.has(id), `${id} belongs to both agents`);
+  });
+
+  test("themes can be filtered to one agent", () => {
+    const themes = JSON.parse(
+      sift(["themes", "--json", "--agent", "coding-agent", "--db", multiDb]).stdout,
+    ) as Array<{ agentId: string }>;
+    assert.ok(themes.length > 0);
+    assert.ok(themes.every((t) => t.agentId === "coding-agent"));
+  });
+
+  test("a command that needs one agent refuses to guess between two", () => {
+    // Silently picking the first agent would report on the wrong product.
+    const r = sift(["delta", "--facet", "behavior", "--db", multiDb]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /several agents/);
+    assert.match(r.stderr, /--agent/);
+  });
+
+  test("naming the agent resolves it", () => {
+    const r = sift(["delta", "--facet", "behavior", "--agent", "support-bot", "--db", multiDb]);
+    // one window only, so it reports that rather than comparing
+    assert.match(r.stderr + r.stdout, /support-bot|two windows/);
+  });
+
+  test("report covers each agent separately", () => {
+    const reports = JSON.parse(
+      sift(["report", "--json", "--facet", "behavior", "--db", multiDb]).stdout,
+    ) as Array<{ agentId: string; totalAssignments: number }>;
+    assert.deepEqual(reports.map((r) => r.agentId).sort(), ["coding-agent", "support-bot"]);
+    // each denominator is that agent's own traffic, not the union
+    assert.ok(reports.every((r) => r.totalAssignments === 8), JSON.stringify(reports));
+  });
+});
+
 describe("privacy gate", () => {
   test("with no file it explains what the gate is set to strip", () => {
     const r = sift(["privacy"]);

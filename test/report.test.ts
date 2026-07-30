@@ -10,6 +10,7 @@ import { DEFAULT_CONFIG } from "../src/config.ts";
 import type { Theme } from "../src/types.ts";
 
 const FACET = "behavior";
+const AGENT = "support-bot";
 
 function store(): SiftStore {
   return new SiftStore(":memory:");
@@ -18,6 +19,7 @@ function store(): SiftStore {
 function addTheme(s: SiftStore, id: string, over: Partial<Theme> = {}): void {
   s.insertTheme({
     id,
+    agentId: AGENT,
     facet: FACET,
     label: `label ${id}`,
     description: `description of ${id}`,
@@ -37,7 +39,7 @@ function addWindow(s: SiftStore, window: string, rows: Array<[string | null, num
     for (let i = 0; i < count; i++) {
       const traceId = `${window}-${themeId ?? "res"}-${n++}`;
       s.insertTrace({ id: traceId, agentId: "support-bot", version: window, startedAt: "2026-07-01T00:00:00.000Z", text: "", meta: {} });
-      s.insertAssignment({ traceId, facet: FACET, themeId, similarity: themeId ? 0.9 : 0.1, window });
+      s.insertAssignment({ traceId, agentId: AGENT, facet: FACET, themeId, similarity: themeId ? 0.9 : 0.1, window });
     }
   }
 }
@@ -79,7 +81,7 @@ describe("sparkline", () => {
 
 describe("buildFacetReport", () => {
   test("uses the latest window by default and computes shares there", () => {
-    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     assert.equal(report.window, "v1.3");
     assert.equal(report.totalAssignments, 100);
 
@@ -91,14 +93,14 @@ describe("buildFacetReport", () => {
   });
 
   test("can report on an explicitly chosen window", () => {
-    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET, window: "v1.2" });
+    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET, window: "v1.2" });
     assert.equal(report.window, "v1.2");
     assert.equal(report.rows.find((r) => r.id === "SIFT-14")!.count, 2);
     assert.equal(report.rows.find((r) => r.id === "SIFT-14")!.previousShare, undefined);
   });
 
   test("surfaces the residual pile and the threshold that would re-run discovery", () => {
-    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     assert.equal(report.residualCount, 77);
     assert.ok(Math.abs(report.residualShare - 0.77) < 1e-9);
     assert.equal(report.rediscoverThreshold, DEFAULT_CONFIG.rediscoverResidualShare);
@@ -109,7 +111,7 @@ describe("buildFacetReport", () => {
     s.updateTheme({ ...s.getTheme("SIFT-21")!, firstWindow: "v1.3" });
     s.updateTheme({ ...s.getTheme("SIFT-3")!, firstWindow: "v1.2" });
 
-    const report = buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     assert.equal(report.rows.find((r) => r.id === "SIFT-21")!.isNewHere, true);
     assert.equal(report.rows.find((r) => r.id === "SIFT-3")!.isNewHere, false);
   });
@@ -117,18 +119,18 @@ describe("buildFacetReport", () => {
   test("a theme first seen earlier is not new here, whatever its state says", () => {
     const s = demoStore();
     s.updateTheme({ ...s.getTheme("SIFT-21")!, firstWindow: "v1.2", state: "new" });
-    const report = buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET, window: "v1.3" });
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET, window: "v1.3" });
     assert.equal(report.rows.find((r) => r.id === "SIFT-21")!.isNewHere, false);
   });
 
   test("orders by current share, biggest first", () => {
-    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     const shares = report.rows.map((r) => r.share);
     assert.deepEqual(shares, [...shares].sort((a, b) => b - a));
   });
 
   test("carries a sparkline of every window, not just the two being compared", () => {
-    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     assert.deepEqual(report.windows, ["v1.2", "v1.3"]);
     assert.equal(report.rows.find((r) => r.id === "SIFT-21")!.history.length, 2);
   });
@@ -136,14 +138,14 @@ describe("buildFacetReport", () => {
   test("includes themes that have no assignments at all, so a dead theme is visible", () => {
     const s = demoStore();
     addTheme(s, "SIFT-99", { label: "never seen again", state: "resolved" });
-    const report = buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET });
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
     const dead = report.rows.find((r) => r.id === "SIFT-99")!;
     assert.equal(dead.count, 0);
     assert.equal(dead.share, 0);
   });
 
   test("an empty facet reports zeroes rather than throwing", () => {
-    const report = buildFacetReport(store(), DEFAULT_CONFIG, { facet: "nothing" });
+    const report = buildFacetReport(store(), DEFAULT_CONFIG, { agentId: AGENT, facet: "nothing" });
     assert.deepEqual(report.rows, []);
     assert.equal(report.totalAssignments, 0);
     assert.equal(report.residualShare, 0);
@@ -153,7 +155,7 @@ describe("buildFacetReport", () => {
 
 describe("issues list (terminal)", () => {
   const render = (over = {}) =>
-    renderIssuesList(buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET }), { agentId: "support-bot", ...over });
+    renderIssuesList(buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET }), { agentId: "support-bot", ...over });
 
   test("leads with the agent, facet and trace count", () => {
     const out = render();
@@ -201,13 +203,13 @@ describe("issues list (terminal)", () => {
     const s = store();
     for (let i = 1; i <= 12; i++) addTheme(s, `SIFT-${i}`);
     addWindow(s, "v1", Array.from({ length: 12 }, (_, i) => [`SIFT-${i + 1}`, 12 - i] as [string, number]));
-    const out = renderIssuesList(buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET }), { limit: 5 });
+    const out = renderIssuesList(buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET }), { limit: 5 });
     assert.equal(out.split("\n").filter((l) => l.includes("SIFT-")).length, 5);
     assert.match(out, /7 more/);
   });
 
   test("an empty registry says what to do next instead of showing an empty table", () => {
-    const out = renderIssuesList(buildFacetReport(store(), DEFAULT_CONFIG, { facet: FACET }), {});
+    const out = renderIssuesList(buildFacetReport(store(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET }), {});
     assert.match(out, /no themes/i);
     assert.match(out, /bootstrap/i);
   });
@@ -215,7 +217,7 @@ describe("issues list (terminal)", () => {
 
 describe("markdown", () => {
   test("renders one table per facet with state, label and counts", () => {
-    const md = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET })]);
+    const md = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
     assert.match(md, /^# sift report/m);
     assert.match(md, /^## behavior/m);
     assert.match(md, /\| id \| state \| label \|/);
@@ -228,7 +230,7 @@ describe("markdown", () => {
     const s = store();
     addTheme(s, "SIFT-1", { label: "a | b" });
     addWindow(s, "v1", [["SIFT-1", 1]]);
-    const md = renderThemeMarkdown([buildFacetReport(s, DEFAULT_CONFIG, { facet: FACET })]);
+    const md = renderThemeMarkdown([buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
     const lines = md.split("\n");
     const header = lines.find((l) => l.startsWith("| id |"))!;
     const row = lines.find((l) => l.startsWith("| SIFT-1 "))!;
@@ -238,20 +240,20 @@ describe("markdown", () => {
   });
 
   test("notes the residual pile under the table", () => {
-    const md = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { facet: FACET })]);
+    const md = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
     assert.match(md, /residual/i);
     assert.match(md, /77/);
   });
 
   test("an empty report still produces a valid document", () => {
-    const md = renderThemeMarkdown([buildFacetReport(store(), DEFAULT_CONFIG, { facet: FACET })]);
+    const md = renderThemeMarkdown([buildFacetReport(store(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
     assert.match(md, /^# sift report/m);
     assert.match(md, /no themes/i);
   });
 });
 
 describe("delta rendering", () => {
-  const report = () => computeDeltas(demoStore(), FACET, "v1.2", "v1.3", { sigma: 2 });
+  const report = () => computeDeltas(demoStore(), AGENT, FACET, "v1.2", "v1.3", { sigma: 2 });
 
   test("markdown separates what needs attention from what is stable", () => {
     const md = renderDeltaMarkdown(report());
@@ -282,7 +284,7 @@ describe("delta rendering", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 10]]);
     addWindow(s, "v2", [["SIFT-1", 10]]);
-    const md = renderDeltaMarkdown(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }));
+    const md = renderDeltaMarkdown(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }));
     assert.match(md, /nothing.*(changed|notable)/i);
   });
 
@@ -293,7 +295,7 @@ describe("delta rendering", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 95], [null, 5]]);
     addWindow(s, "v2", [["SIFT-1", 60], [null, 40]]);
-    const md = renderDeltaMarkdown(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }));
+    const md = renderDeltaMarkdown(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }));
     assert.match(md, /residual/i);
     assert.match(md, /40\.0%/);
   });

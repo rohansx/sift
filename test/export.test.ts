@@ -11,6 +11,7 @@ function seeded(over: Partial<Theme> = {}): SiftStore {
   const s = new SiftStore(":memory:");
   s.insertTheme({
     id: "SIFT-14",
+    agentId: "support-bot",
     facet: FACET,
     label: "tool-retry loop on search_kb",
     description: "the agent retries search_kb after it times out, without backing off",
@@ -33,7 +34,7 @@ function seeded(over: Partial<Theme> = {}): SiftStore {
       meta: { tools: ["search_kb"], hasError: true },
     });
     s.insertSummary({ traceId: id, facet: FACET, summary: "retried search_kb after a timeout", embedding: [1, 0] });
-    s.insertAssignment({ traceId: id, facet: FACET, themeId: "SIFT-14", similarity: sim, window: "v1.3" });
+    s.insertAssignment({ traceId: id, agentId: "support-bot", facet: FACET, themeId: "SIFT-14", similarity: sim, window: "v1.3" });
   }
   return s;
 }
@@ -66,7 +67,7 @@ describe("exportTheme", () => {
   test("falls back to the head of the trace when no input line is recognisable", () => {
     const s = seeded();
     s.insertTrace({ id: "odd", agentId: "x", startedAt: "2026-07-15T00:00:00.000Z", text: "## mystery_step\nsomething happened", meta: {} });
-    s.insertAssignment({ traceId: "odd", facet: FACET, themeId: "SIFT-14", similarity: 0.99, window: "v1.3" });
+    s.insertAssignment({ traceId: "odd", agentId: "support-bot", facet: FACET, themeId: "SIFT-14", similarity: 0.99, window: "v1.3" });
     const exp = exportTheme(s, "SIFT-14");
     assert.match(exp.cases[0]!.input, /mystery_step|something happened/);
   });
@@ -107,7 +108,7 @@ describe("exportTheme", () => {
   test("a theme with no assignments still exports, and says the fixtures are empty", () => {
     const s = new SiftStore(":memory:");
     s.insertTheme({
-      id: "SIFT-1", facet: FACET, label: "lonely", description: "", state: "new",
+      id: "SIFT-1", agentId: "support-bot", facet: FACET, label: "lonely", description: "", state: "new",
       centroid: [1], memberCount: 0, exemplarTraceIds: [], createdAt: "x", updatedAt: "x",
     });
     const exp = exportTheme(s, "SIFT-1");
@@ -186,7 +187,7 @@ describe("generated modules", () => {
   test("an empty theme produces a valid module rather than broken syntax", () => {
     const s = new SiftStore(":memory:");
     s.insertTheme({
-      id: "SIFT-1", facet: FACET, label: "lonely", description: "", state: "new",
+      id: "SIFT-1", agentId: "support-bot", facet: FACET, label: "lonely", description: "", state: "new",
       centroid: [1], memberCount: 0, exemplarTraceIds: [], createdAt: "x", updatedAt: "x",
     });
     assertParses(toMastraScorerModule(exportTheme(s, "SIFT-1")));

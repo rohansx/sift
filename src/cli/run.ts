@@ -3,12 +3,12 @@ import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { ConfigError, loadConfig, type DeepPartial, type SiftConfig } from "../config.ts";
-import { createPipeline, type Pipeline } from "../pipeline.ts";
+import { createPipeline, createPseudonymizer, Pipeline } from "../pipeline.ts";
 import { renderDeltaMarkdown, renderThemeMarkdown } from "../report/markdown.ts";
 import { renderDeltaTerminal, renderIssuesList } from "../report/terminal.ts";
 import { EXPORT_FORMATS, renderExport, type ExportFormat } from "../export/evals.ts";
 import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
-import { createPseudonymizer } from "../pipeline.ts";
+
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
 import { THEME_STATES, type ThemeState } from "../types.ts";
@@ -52,6 +52,8 @@ OTHER
   help, version
 
 GLOBAL OPTIONS
+  --agent <name>       act on one agent (required when a database holds several)
+  --since <window>     only traces since an ISO date or a span like 7d, 24h
   --db <path>          sqlite database (default ./sift.db, env SIFT_DB)
   --config <path>      config file (default ./sift.config.json)
   --preset <name>      facet preset: chat | pipeline | coding | support
@@ -93,6 +95,7 @@ const OPTIONS = {
   state: { type: "string" },
   label: { type: "string" },
   limit: { type: "string" },
+  since: { type: "string" },
   traces: { type: "string" },
   seed: { type: "string" },
   strict: { type: "boolean" },
@@ -321,9 +324,11 @@ function cmdIngest(pipeline: Pipeline, ctx: Ctx): number {
 }
 
 async function cmdSummarize(pipeline: Pipeline, ctx: Ctx): Promise<number> {
-  const opts: { limit?: number } = {};
+  const opts: { limit?: number; since?: string; agentId?: string } = {};
   const limit = intOption(ctx, "limit");
   if (limit !== undefined) opts.limit = limit;
+  if (typeof ctx.values.since === "string") opts.since = Pipeline.resolveSince(ctx.values.since);
+  if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
 
   const result = await pipeline.summarize(opts);
   if (ctx.json) {
@@ -344,8 +349,8 @@ async function cmdBootstrap(pipeline: Pipeline, ctx: Ctx): Promise<number> {
     process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
     return 0;
   }
-  for (const { facet, created } of results) {
-    process.stdout.write(`${facet}: ${created.length} themes discovered\n`);
+  for (const { agentId, facet, created } of results) {
+    process.stdout.write(`${agentId}/${facet}: ${created.length} themes discovered\n`);
     for (const t of created) process.stdout.write(`  ${t.id}  ${t.label}  (${t.memberCount})\n`);
   }
   return 0;
@@ -358,7 +363,7 @@ async function cmdAssign(pipeline: Pipeline, ctx: Ctx): Promise<number> {
     return 0;
   }
   for (const r of results) {
-    process.stdout.write(`${r.facet}: ${r.assigned} assigned, ${r.residual} residual\n`);
+    process.stdout.write(`${r.agentId}/${r.facet}: ${r.assigned} assigned, ${r.residual} residual\n`);
     for (const t of r.rediscovered) process.stdout.write(`  NEW ${t.id}  ${t.label}  (${t.memberCount})\n`);
     for (const t of [...r.transitions, ...r.autoResolved]) {
       process.stdout.write(`  ${t.themeId}: ${t.from} -> ${t.to}\n`);
@@ -368,12 +373,13 @@ async function cmdAssign(pipeline: Pipeline, ctx: Ctx): Promise<number> {
 }
 
 async function cmdAnalyze(pipeline: Pipeline, ctx: Ctx): Promise<number> {
-  const opts: { otlpPath?: string; agentId?: string; limit?: number } = {};
+  const opts: { otlpPath?: string; agentId?: string; limit?: number; since?: string } = {};
   const path = typeof ctx.values.otlp === "string" ? ctx.values.otlp : ctx.positionals[0];
   if (path) opts.otlpPath = path;
   if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
   const limit = intOption(ctx, "limit");
   if (limit !== undefined) opts.limit = limit;
+  if (typeof ctx.values.since === "string") opts.since = Pipeline.resolveSince(ctx.values.since);
 
   const result = await pipeline.analyze(opts);
   if (ctx.json) {
@@ -384,9 +390,10 @@ async function cmdAnalyze(pipeline: Pipeline, ctx: Ctx): Promise<number> {
 }
 
 function cmdReport(pipeline: Pipeline, ctx: Ctx): number {
-  const opts: { facet?: string; window?: string } = {};
+  const opts: { facet?: string; window?: string; agentId?: string } = {};
   if (typeof ctx.values.facet === "string") opts.facet = ctx.values.facet;
   if (typeof ctx.values.window === "string") opts.window = ctx.values.window;
+  if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
   const reports = pipeline.report(opts);
 
   const format = typeof ctx.values.format === "string" ? ctx.values.format : ctx.json ? "json" : "terminal";
@@ -398,31 +405,31 @@ function cmdReport(pipeline: Pipeline, ctx: Ctx): number {
     process.stdout.write(renderThemeMarkdown(reports));
     return 0;
   }
-  const agentId = pipeline.store.agentIds()[0];
   for (const report of reports) {
-    const listOpts: { agentId?: string; color: boolean } = { color: ctx.color };
-    if (agentId) listOpts.agentId = agentId;
-    process.stdout.write(renderIssuesList(report, listOpts));
+    process.stdout.write(renderIssuesList(report, { agentId: report.agentId, color: ctx.color }));
   }
   return 0;
 }
 
 function cmdDelta(pipeline: Pipeline, ctx: Ctx): number {
   const facet = typeof ctx.values.facet === "string" ? ctx.values.facet : pipeline.facets[0]!.name;
+  const agentId = resolveAgent(pipeline, ctx);
+  if (agentId === null) return 2;
+
   let from = typeof ctx.values.from === "string" ? ctx.values.from : undefined;
   let to = typeof ctx.values.to === "string" ? ctx.values.to : undefined;
 
   if (!from || !to) {
-    const pair = pipeline.latestWindowPair(facet);
+    const pair = pipeline.latestWindowPair(agentId, facet);
     if (!pair) {
-      process.stderr.write(`facet "${facet}" does not have two windows to compare yet\n`);
+      process.stderr.write(`${agentId}/${facet} does not have two windows to compare yet\n`);
       return 2;
     }
     from ??= pair.from;
     to ??= pair.to;
   }
 
-  const report = pipeline.delta(facet, from, to);
+  const report = pipeline.delta(agentId, facet, from, to);
   const format = typeof ctx.values.format === "string" ? ctx.values.format : ctx.json ? "json" : "terminal";
   if (format === "json") process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   else if (format === "md" || format === "markdown") process.stdout.write(renderDeltaMarkdown(report));
@@ -438,6 +445,7 @@ function cmdThemes(pipeline: Pipeline, ctx: Ctx): number {
   }
 
   let themes = pipeline.store.allThemes();
+  if (typeof ctx.values.agent === "string") themes = themes.filter((t) => t.agentId === ctx.values.agent);
   if (typeof ctx.values.facet === "string") themes = themes.filter((t) => t.facet === ctx.values.facet);
   if (stateFilter) themes = themes.filter((t) => t.state === stateFilter);
 
@@ -451,9 +459,15 @@ function cmdThemes(pipeline: Pipeline, ctx: Ctx): number {
   }
   const idWidth = Math.max(...themes.map((t) => t.id.length));
   const stateWidth = Math.max(...themes.map((t) => t.state.length));
+  // The agent column only earns its space when there is more than one.
+  const agents = new Set(themes.map((t) => t.agentId));
+  const agentWidth = agents.size > 1 ? Math.max(...themes.map((t) => t.agentId.length)) : 0;
+  const facetWidth = Math.max(...themes.map((t) => t.facet.length));
+
   for (const t of themes) {
+    const agent = agentWidth > 0 ? `${t.agentId.padEnd(agentWidth)}  ` : "";
     process.stdout.write(
-      `${t.id.padEnd(idWidth)}  ${t.state.padEnd(stateWidth)}  ${String(t.memberCount).padStart(5)}  ${t.facet}  ${t.label}\n`,
+      `${t.id.padEnd(idWidth)}  ${t.state.padEnd(stateWidth)}  ${String(t.memberCount).padStart(5)}  ${agent}${t.facet.padEnd(facetWidth)}  ${t.label}\n`,
     );
   }
   return 0;
@@ -504,17 +518,25 @@ function cmdLifecycle(command: string, pipeline: Pipeline, ctx: Ctx): number {
   }
   const note = typeof ctx.values.note === "string" ? ctx.values.note : undefined;
 
+  // The theme knows which agent it belongs to, so the caller never has to say.
+  const existing = pipeline.store.getTheme(themeId);
+  if (!existing) {
+    process.stderr.write(`no such theme: ${themeId}\n`);
+    return 1;
+  }
+  const registry = pipeline.registryFor(existing.agentId);
+
   let theme;
-  if (command === "resolve") theme = pipeline.registry.resolve(themeId, note);
-  else if (command === "mute") theme = pipeline.registry.mute(themeId, note);
-  else if (command === "reopen") theme = pipeline.registry.reopen(themeId);
+  if (command === "resolve") theme = registry.resolve(themeId, note);
+  else if (command === "mute") theme = registry.mute(themeId, note);
+  else if (command === "reopen") theme = registry.reopen(themeId);
   else {
     const label = typeof ctx.values.label === "string" ? ctx.values.label : ctx.positionals.slice(1).join(" ");
     if (!label) {
       process.stderr.write(`relabel needs a new label: sift relabel ${themeId} --label "..."\n`);
       return 2;
     }
-    theme = pipeline.registry.relabel(themeId, label);
+    theme = registry.relabel(themeId, label);
   }
 
   if (ctx.json) process.stdout.write(`${JSON.stringify(theme, null, 2)}\n`);
@@ -548,6 +570,25 @@ function cmdExport(pipeline: Pipeline, ctx: Ctx): number {
 }
 
 /* ---------- helpers ---------- */
+
+/**
+ * Which agent a single-agent command should act on. With one agent in the
+ * database the answer is obvious; with several, guessing would silently report
+ * on the wrong product, so it asks.
+ */
+function resolveAgent(pipeline: Pipeline, ctx: Ctx): string | null {
+  if (typeof ctx.values.agent === "string") return ctx.values.agent;
+  const agents = pipeline.agents();
+  if (agents.length === 1) return agents[0]!;
+  if (agents.length === 0) {
+    process.stderr.write("no traces ingested yet\n");
+    return null;
+  }
+  process.stderr.write(
+    `this database holds several agents (${agents.join(", ")}); pick one with --agent <name>\n`,
+  );
+  return null;
+}
 
 function intOption(ctx: Ctx, name: string): number | undefined {
   const raw = ctx.values[name];

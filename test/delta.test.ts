@@ -6,6 +6,7 @@ import { SiftStore } from "../src/store/db.ts";
 import type { DeltaFinding, Theme, ThemeState } from "../src/types.ts";
 
 const FACET = "behavior";
+const AGENT = "support-bot";
 
 function store(): SiftStore {
   return new SiftStore(":memory:");
@@ -14,6 +15,7 @@ function store(): SiftStore {
 function addTheme(s: SiftStore, id: string, over: Partial<Theme> = {}): void {
   s.insertTheme({
     id,
+    agentId: AGENT,
     facet: FACET,
     label: `label for ${id}`,
     description: "",
@@ -33,7 +35,7 @@ function addWindow(s: SiftStore, window: string, rows: Array<[string | null, num
   for (const [themeId, count] of rows) {
     for (let i = 0; i < count; i++) {
       const traceId = `${window}-${themeId ?? "residual"}-${n++}`;
-      s.insertAssignment({ traceId, facet: FACET, themeId, similarity: themeId ? 0.9 : 0.1, window });
+      s.insertAssignment({ traceId, agentId: AGENT, facet: FACET, themeId, similarity: themeId ? 0.9 : 0.1, window });
     }
   }
 }
@@ -51,7 +53,7 @@ describe("share math", () => {
     addWindow(s, "v1", [["SIFT-1", 2], [null, 8]]);
     addWindow(s, "v2", [["SIFT-1", 6], [null, 4]]);
 
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     const f = findingFor(report, "SIFT-1");
     assert.equal(f.fromCount, 2);
     assert.equal(f.toCount, 6);
@@ -66,7 +68,7 @@ describe("share math", () => {
     const s = store();
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 5], [null, 5]]);
-    const report = computeDeltas(s, FACET, "v1", "v1", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v1", { sigma: 2 });
     assert.equal(findingFor(report, "SIFT-1").fromShare, 0.5);
     assert.equal(report.fromResidualShare, 0.5);
     assert.equal(report.fromTotal, 10);
@@ -77,7 +79,7 @@ describe("share math", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 9], [null, 1]]);
     addWindow(s, "v2", [["SIFT-1", 15], [null, 5]]);
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.equal(report.fromTotal, 10);
     assert.equal(report.toTotal, 20);
     assert.ok(Math.abs(report.fromResidualShare - 0.1) < 1e-9);
@@ -93,7 +95,7 @@ describe("severity", () => {
     addWindow(s, "v1", [["SIFT-1", 10]]);
     addWindow(s, "v2", [["SIFT-1", 8], ["SIFT-2", 2]]);
 
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.equal(findingFor(report, "SIFT-2").severity, "new");
     assert.equal(findingFor(report, "SIFT-2").fromCount, 0);
   });
@@ -104,7 +106,7 @@ describe("severity", () => {
     addWindow(s, "v1", [["SIFT-1", 0], [null, 10]]);
     addWindow(s, "v2", [["SIFT-1", 4], [null, 6]]);
 
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.equal(findingFor(report, "SIFT-1").severity, "regression");
   });
 
@@ -113,7 +115,7 @@ describe("severity", () => {
     addTheme(s, "SIFT-1", { state: "resolved" });
     addWindow(s, "v1", [["SIFT-1", 5], [null, 5]]);
     addWindow(s, "v2", [[null, 10]]);
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.notEqual(findingFor(report, "SIFT-1").severity, "regression");
   });
 
@@ -122,7 +124,7 @@ describe("severity", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 2], [null, 98]]);
     addWindow(s, "v2", [["SIFT-1", 30], [null, 70]]);
-    assert.equal(findingFor(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1").severity, "notable");
+    assert.equal(findingFor(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1").severity, "notable");
   });
 
   test("a change smaller than the floor is never notable, however quiet the history", () => {
@@ -130,7 +132,7 @@ describe("severity", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 100], [null, 900]]);
     addWindow(s, "v2", [["SIFT-1", 103], [null, 897]]);
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2, minAbsDelta: 0.01 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2, minAbsDelta: 0.01 });
     assert.equal(findingFor(report, "SIFT-1").severity, "info");
   });
 
@@ -151,7 +153,7 @@ describe("severity", () => {
     }
     addWindow(s, "w5", [["STEADY", 35], ["NOISY", 35], [null, 30]]);
 
-    const report = computeDeltas(s, FACET, "w4", "w5", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "w4", "w5", { sigma: 2 });
     assert.equal(findingFor(report, "STEADY").severity, "notable");
     assert.equal(findingFor(report, "NOISY").severity, "info");
   });
@@ -162,7 +164,7 @@ describe("severity", () => {
     addWindow(s, "w1", [["SIFT-1", 10], [null, 90]]);
     addWindow(s, "w2", [["SIFT-1", 20], [null, 80]]);
     addWindow(s, "w3", [["SIFT-1", 60], [null, 40]]);
-    const f = findingFor(computeDeltas(s, FACET, "w2", "w3", { sigma: 2 }), "SIFT-1");
+    const f = findingFor(computeDeltas(s, AGENT, FACET, "w2", "w3", { sigma: 2 }), "SIFT-1");
     assert.ok(f.sigmas > 2, `expected a multi-sigma move, got ${f.sigmas}`);
     assert.ok(Number.isFinite(f.sigmas));
   });
@@ -171,7 +173,7 @@ describe("severity", () => {
     const s = store();
     addTheme(s, "SIFT-1");
     addWindow(s, "v2", [["SIFT-1", 10]]);
-    const f = findingFor(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
+    const f = findingFor(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
     assert.equal(f.sigmas, 0);
   });
 });
@@ -184,7 +186,7 @@ describe("what gets reported", () => {
     addWindow(s, "v1", [["SIFT-1", 5], ["SIFT-2", 5]]);
     addWindow(s, "v2", [["SIFT-1", 50], ["SIFT-2", 5]]);
 
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.deepEqual(report.findings.map((f) => f.themeId), ["SIFT-2"]);
   });
 
@@ -193,7 +195,7 @@ describe("what gets reported", () => {
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 10]]);
     addWindow(s, "v2", [[null, 10]]);
-    const f = findingFor(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
+    const f = findingFor(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
     assert.equal(f.toCount, 0);
     assert.ok(f.delta < 0);
     assert.notEqual(f.severity, "new");
@@ -204,7 +206,7 @@ describe("what gets reported", () => {
     addTheme(s, "SIFT-1", { label: "tool-retry loop on search_kb", state: "regressed" });
     addWindow(s, "v1", [["SIFT-1", 1], [null, 9]]);
     addWindow(s, "v2", [["SIFT-1", 5], [null, 5]]);
-    const f = findingFor(computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
+    const f = findingFor(computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }), "SIFT-1");
     assert.equal(f.label, "tool-retry loop on search_kb");
     assert.equal(f.state, "regressed" as ThemeState);
   });
@@ -217,7 +219,7 @@ describe("what gets reported", () => {
     addWindow(s, "v1", [["REG", 0], ["BIG", 5], ["SMALL", 40], [null, 55]]);
     addWindow(s, "v2", [["REG", 5], ["BIG", 40], ["SMALL", 38], [null, 17]]);
 
-    const order = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 }).findings.map((f) => f.themeId);
+    const order = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 }).findings.map((f) => f.themeId);
     assert.equal(order[0], "REG", "regressions lead the list");
     assert.ok(order.indexOf("BIG") < order.indexOf("SMALL"));
   });
@@ -226,7 +228,7 @@ describe("what gets reported", () => {
     const s = store();
     addWindow(s, "v1", [["GHOST", 5], [null, 5]]);
     addWindow(s, "v2", [["GHOST", 8], [null, 2]]);
-    const report = computeDeltas(s, FACET, "v1", "v2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "v1", "v2", { sigma: 2 });
     assert.deepEqual(report.findings, []);
   });
 
@@ -234,7 +236,7 @@ describe("what gets reported", () => {
     const s = store();
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 5]]);
-    const report = computeDeltas(s, FACET, "nope-1", "nope-2", { sigma: 2 });
+    const report = computeDeltas(s, AGENT, FACET, "nope-1", "nope-2", { sigma: 2 });
     assert.deepEqual(report.findings, []);
     assert.equal(report.toTotal, 0);
   });
@@ -243,7 +245,7 @@ describe("what gets reported", () => {
     const s = store();
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 5], [null, 5]]);
-    const f = findingFor(computeDeltas(s, FACET, "v1", "v1", { sigma: 2 }), "SIFT-1");
+    const f = findingFor(computeDeltas(s, AGENT, FACET, "v1", "v1", { sigma: 2 }), "SIFT-1");
     assert.equal(f.delta, 0);
     assert.equal(f.severity, "info");
   });
@@ -257,7 +259,7 @@ describe("themeSeries", () => {
     addWindow(s, "v1", [["SIFT-1", 5], [null, 5]]);
     addWindow(s, "v2", [["SIFT-1", 2], ["SIFT-2", 8]]);
 
-    const series = themeSeries(s, FACET);
+    const series = themeSeries(s, AGENT, FACET);
     assert.deepEqual(series.windows, ["v1", "v2"]);
     assert.deepEqual(series.byTheme.get("SIFT-1")!.map((p) => p.share), [0.5, 0.2]);
     // a theme absent from a window is 0, not missing — sparklines need the gap
@@ -269,12 +271,12 @@ describe("themeSeries", () => {
     const s = store();
     addTheme(s, "SIFT-1");
     addWindow(s, "v1", [["SIFT-1", 9], [null, 1]]);
-    const series = themeSeries(s, FACET);
+    const series = themeSeries(s, AGENT, FACET);
     assert.deepEqual(series.residual.map((p) => p.share), [0.1]);
   });
 
   test("an empty facet yields empty series rather than throwing", () => {
-    const series = themeSeries(store(), "nothing");
+    const series = themeSeries(store(), AGENT, "nothing");
     assert.deepEqual(series.windows, []);
     assert.equal(series.byTheme.size, 0);
   });

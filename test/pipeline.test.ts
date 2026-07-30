@@ -157,7 +157,7 @@ describe("analyze", () => {
   test("windows come from the release tag, so deltas line up with deploys", async () => {
     const { pipeline, store } = makePipeline();
     await pipeline.analyze({ jsonl: generateDemoTraces({ tracesPerVersion: 40, seed: 3 }).jsonl });
-    assert.deepEqual(store.windowsForFacet("behavior"), ["v1.2", "v1.3"]);
+    assert.deepEqual(store.windowsForFacet("support-bot", "behavior"), ["v1.2", "v1.3"]);
   });
 
   test("re-runs discovery when the residual pile grows past the threshold", async () => {
@@ -190,18 +190,18 @@ describe("views", () => {
     const { pipeline } = makePipeline();
     await pipeline.analyze({ jsonl: generateDemoTraces({ tracesPerVersion: 40, seed: 4 }).jsonl });
     assert.deepEqual(pipeline.report().map((r) => r.facet), ["goal", "behavior"]);
-    assert.deepEqual(pipeline.report({ facet: "behavior" }).map((r) => r.facet), ["behavior"]);
+    assert.deepEqual(pipeline.report({ agentId: "support-bot", facet: "behavior" }).map((r) => r.facet), ["behavior"]);
   });
 
   test("latestWindowPair picks the two most recent windows", async () => {
     const { pipeline } = makePipeline();
     await pipeline.analyze({ jsonl: generateDemoTraces({ tracesPerVersion: 40, seed: 6 }).jsonl });
-    assert.deepEqual(pipeline.latestWindowPair("behavior"), { from: "v1.2", to: "v1.3" });
+    assert.deepEqual(pipeline.latestWindowPair("support-bot", "behavior"), { from: "v1.2", to: "v1.3" });
   });
 
   test("latestWindowPair is null when there is nothing to compare", () => {
     const { pipeline } = makePipeline();
-    assert.equal(pipeline.latestWindowPair("behavior"), null);
+    assert.equal(pipeline.latestWindowPair("support-bot", "behavior"), null);
   });
 
   test("a theme can be exported straight out of the pipeline", async () => {

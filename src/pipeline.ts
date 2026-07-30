@@ -49,11 +49,13 @@ export interface SummarizeSummary {
 }
 
 export interface DiscoverySummary {
+  agentId: string;
   facet: string;
   created: Theme[];
 }
 
 export interface AssignSummary {
+  agentId: string;
   facet: string;
   assigned: number;
   residual: number;
@@ -65,11 +67,13 @@ export interface AssignSummary {
 export class Pipeline {
   readonly store: SiftStore;
   readonly cfg: SiftConfig;
-  readonly registry: ThemeRegistry;
   readonly facets: FacetDef[];
   private summarizer: Summarizer;
   private embedder: Embedder;
+  private labeler: Labeler;
+  private clock: Clock;
   private log: (message: string) => void;
+  private registries = new Map<string, ThemeRegistry>();
 
   constructor(store: SiftStore, cfg: SiftConfig, deps: PipelineDeps) {
     this.store = store;
@@ -77,11 +81,52 @@ export class Pipeline {
     this.facets = resolveFacets(cfg);
     this.summarizer = deps.summarizer;
     this.embedder = deps.embedder;
+    this.labeler = deps.labeler;
+    this.clock = deps.clock ?? systemClock;
     this.log = deps.log ?? (() => {});
-    this.registry = new ThemeRegistry(store, cfg, {
-      labeler: deps.labeler,
-      clock: deps.clock ?? systemClock,
-    });
+  }
+
+  /** Every agent this database holds traces for. */
+  agents(): string[] {
+    return this.store.agentIds();
+  }
+
+  /**
+   * The registry for one agent. Registries are per-agent because a theme's
+   * vocabulary is: "retry loop on search_kb" means nothing for a coding agent,
+   * and letting the two share centroids merges two products into one issues
+   * list that describes neither.
+   */
+  registryFor(agentId: string): ThemeRegistry {
+    let registry = this.registries.get(agentId);
+    if (!registry) {
+      registry = new ThemeRegistry(this.store, this.cfg, {
+        labeler: this.labeler,
+        clock: this.clock,
+        agentId,
+      });
+      this.registries.set(agentId, registry);
+    }
+    return registry;
+  }
+
+  /**
+   * Resolves a `--since` window: an ISO date, or a relative span like 7d/24h/30m.
+   * Never silently falls back to "everything" — that would quietly re-summarize
+   * an entire history and bill for it.
+   */
+  static resolveSince(since: string, now: Date = new Date()): string {
+    const relative = /^(\d+)\s*([mhdw])$/i.exec(since.trim());
+    if (relative) {
+      const n = Number(relative[1]);
+      const unitMs: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+      return new Date(now.getTime() - n * unitMs[relative[2]!.toLowerCase()]!).toISOString();
+    }
+    const parsed = Date.parse(since);
+    if (Number.isNaN(parsed)) {
+      throw new Error(`could not understand --since ${JSON.stringify(since)}; use an ISO date or a span like 7d, 24h, 30m`);
+    }
+    return new Date(parsed).toISOString();
   }
 
   /* ---------- ingest ---------- */
@@ -113,9 +158,12 @@ export class Pipeline {
    * A trace whose summarization fails is left pending rather than half-written,
    * so the next run picks it up instead of skipping it forever.
    */
-  async summarize(opts: { limit?: number } = {}): Promise<SummarizeSummary> {
+  async summarize(opts: { limit?: number; since?: string; agentId?: string } = {}): Promise<SummarizeSummary> {
     const facetNames = this.facets.map((f) => f.name);
-    const pending = this.store.tracesNeedingSummaries(facetNames, opts.limit ?? 1000);
+    const query: { limit: number; since?: string; agentId?: string } = { limit: opts.limit ?? 1000 };
+    if (opts.since) query.since = opts.since;
+    if (opts.agentId) query.agentId = opts.agentId;
+    const pending = this.store.tracesNeedingSummaries(facetNames, query);
     const failures: SummarizeSummary["failures"] = [];
     let summaries = 0;
 
@@ -152,14 +200,21 @@ export class Pipeline {
   /* ---------- discovery & assignment ---------- */
 
   /** Discover themes for every facet. At bootstrap the residual pile is everything. */
-  async bootstrap(): Promise<DiscoverySummary[]> {
+  async bootstrap(opts: { agentId?: string } = {}): Promise<DiscoverySummary[]> {
     const out: DiscoverySummary[] = [];
-    for (const facet of this.facets) {
-      const created = await this.registry.discover(facet.name);
-      this.log(`${facet.name}: discovered ${created.length} themes`);
-      out.push({ facet: facet.name, created });
+    for (const agentId of this.agentScope(opts.agentId)) {
+      for (const facet of this.facets) {
+        const created = await this.registryFor(agentId).discover(facet.name);
+        this.log(`${agentId}/${facet.name}: discovered ${created.length} themes`);
+        out.push({ agentId, facet: facet.name, created });
+      }
     }
     return out;
+  }
+
+  private agentScope(agentId?: string): string[] {
+    if (agentId) return [agentId];
+    return this.agents();
   }
 
   /**
@@ -168,35 +223,41 @@ export class Pipeline {
    * facet per pass — a second pass on the same residuals would find the same
    * nothing and only burn tokens.
    */
-  async assign(): Promise<AssignSummary[]> {
+  async assign(opts: { agentId?: string } = {}): Promise<AssignSummary[]> {
     const out: AssignSummary[] = [];
-    for (const facet of this.facets) {
-      const result = this.registry.assignPending(facet.name);
-      let rediscovered: Theme[] = [];
+    for (const agentId of this.agentScope(opts.agentId)) {
+      const registry = this.registryFor(agentId);
+      for (const facet of this.facets) {
+        const result = registry.assignPending(facet.name);
+        let rediscovered: Theme[] = [];
 
-      const windows = this.store.windowsForFacet(facet.name);
-      const latest = windows[windows.length - 1];
-      if (latest && this.registry.needsRediscovery(facet.name, latest)) {
-        this.log(`${facet.name}: residual pile over ${(this.cfg.rediscoverResidualShare * 100).toFixed(0)}%, running discovery`);
-        rediscovered = await this.registry.discover(facet.name);
-        if (rediscovered.length > 0) {
-          // newly created themes may also cover older residuals
-          const second = this.registry.assignPending(facet.name);
-          result.assigned += second.assigned;
-          result.transitions.push(...second.transitions);
+        const windows = this.store.windowsForFacet(agentId, facet.name);
+        const latest = windows[windows.length - 1];
+        if (latest && registry.needsRediscovery(facet.name, latest)) {
+          this.log(
+            `${agentId}/${facet.name}: residual pile over ${(this.cfg.rediscoverResidualShare * 100).toFixed(0)}%, running discovery`,
+          );
+          rediscovered = await registry.discover(facet.name);
+          if (rediscovered.length > 0) {
+            // newly created themes may also cover older residuals
+            const second = registry.assignPending(facet.name);
+            result.assigned += second.assigned;
+            result.transitions.push(...second.transitions);
+          }
         }
-      }
 
-      const autoResolved = this.registry.sweepAutoResolve(facet.name);
-      this.log(`${facet.name}: ${result.assigned} assigned, ${result.residual} residual`);
-      out.push({
-        facet: facet.name,
-        assigned: result.assigned,
-        residual: result.residual,
-        transitions: result.transitions,
-        rediscovered,
-        autoResolved,
-      });
+        const autoResolved = registry.sweepAutoResolve(facet.name);
+        this.log(`${agentId}/${facet.name}: ${result.assigned} assigned, ${result.residual} residual`);
+        out.push({
+          agentId,
+          facet: facet.name,
+          assigned: result.assigned,
+          residual: result.residual,
+          transitions: result.transitions,
+          rediscovered,
+          autoResolved,
+        });
+      }
     }
     return out;
   }
@@ -207,7 +268,7 @@ export class Pipeline {
    * Ingest (optional) → summarize → embed → discover-or-assign.
    * The one command that takes a pile of traces and produces an issues list.
    */
-  async analyze(opts: { otlpPath?: string; jsonl?: string; agentId?: string; limit?: number } = {}): Promise<{
+  async analyze(opts: { otlpPath?: string; jsonl?: string; agentId?: string; limit?: number; since?: string } = {}): Promise<{
     ingest?: IngestSummary;
     summarize: SummarizeSummary;
     discovery: DiscoverySummary[];
@@ -220,14 +281,21 @@ export class Pipeline {
     if (opts.otlpPath) ingest = this.ingestFile(opts.otlpPath, ingestOpts);
     else if (opts.jsonl !== undefined) ingest = this.ingestJsonl(opts.jsonl, ingestOpts);
 
-    const summarizeOpts: { limit?: number } = {};
+    const summarizeOpts: { limit?: number; since?: string; agentId?: string } = {};
     if (opts.limit !== undefined) summarizeOpts.limit = opts.limit;
+    if (opts.since !== undefined) summarizeOpts.since = opts.since;
     const summarize = await this.summarize(summarizeOpts);
 
     // Bootstrap and steady state are the same code path; discovery on an empty
-    // registry simply has everything as its residual pile.
-    const discovery = this.store.allThemes().length === 0 ? await this.bootstrap() : [];
-    const assign = await this.assign();
+    // registry simply has everything as its residual pile. Decided per agent,
+    // so adding a second agent later still gets a proper first discovery.
+    const discovery: DiscoverySummary[] = [];
+    for (const agentId of this.agentScope(opts.agentId)) {
+      if (this.store.allThemes(agentId).length === 0) discovery.push(...(await this.bootstrap({ agentId })));
+    }
+    const assignOpts: { agentId?: string } = {};
+    if (opts.agentId) assignOpts.agentId = opts.agentId;
+    const assign = await this.assign(assignOpts);
 
     const result: {
       ingest?: IngestSummary;
@@ -241,22 +309,26 @@ export class Pipeline {
 
   /* ---------- views ---------- */
 
-  report(opts: { facet?: string; window?: string } = {}): FacetReport[] {
+  report(opts: { facet?: string; window?: string; agentId?: string } = {}): FacetReport[] {
     const facets = opts.facet ? [opts.facet] : this.facets.map((f) => f.name);
-    return facets.map((facet) => {
-      const reportOpts: { facet: string; window?: string } = { facet };
-      if (opts.window) reportOpts.window = opts.window;
-      return buildFacetReport(this.store, this.cfg, reportOpts);
-    });
+    const out: FacetReport[] = [];
+    for (const agentId of this.agentScope(opts.agentId)) {
+      for (const facet of facets) {
+        const reportOpts: { agentId: string; facet: string; window?: string } = { agentId, facet };
+        if (opts.window) reportOpts.window = opts.window;
+        out.push(buildFacetReport(this.store, this.cfg, reportOpts));
+      }
+    }
+    return out;
   }
 
-  delta(facet: string, fromWindow: string, toWindow: string): DeltaReport {
-    return computeDeltas(this.store, facet, fromWindow, toWindow, { sigma: this.cfg.deltaSigma });
+  delta(agentId: string, facet: string, fromWindow: string, toWindow: string): DeltaReport {
+    return computeDeltas(this.store, agentId, facet, fromWindow, toWindow, { sigma: this.cfg.deltaSigma });
   }
 
   /** The two most recent windows for a facet, which is what `sift delta` defaults to. */
-  latestWindowPair(facet: string): { from: string; to: string } | null {
-    const windows = this.store.windowsForFacet(facet);
+  latestWindowPair(agentId: string, facet: string): { from: string; to: string } | null {
+    const windows = this.store.windowsForFacet(agentId, facet);
     if (windows.length < 2) return null;
     return { from: windows[windows.length - 2]!, to: windows[windows.length - 1]! };
   }

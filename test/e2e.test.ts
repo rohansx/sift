@@ -35,7 +35,7 @@ let world: World;
 
 /** The theme whose members are mostly `scenario`, plus how cleanly it captured it. */
 function themeFor(w: World, facet: string, scenario: string) {
-  const themes = w.store.themesForFacet(facet);
+  const themes = w.store.themesForFacet("support-bot", facet);
   const scored = themes.map((theme) => {
     const members = w.store.tracesForTheme(theme.id, 10_000);
     const matching = members.filter((t) => w.records.get(t.id)?.scenario === scenario).length;
@@ -87,13 +87,13 @@ describe("the whole pipeline, offline", () => {
   });
 
   test("discovers themes without being told what to look for", () => {
-    const behavior = world.store.themesForFacet("behavior");
+    const behavior = world.store.themesForFacet("support-bot", "behavior");
     assert.ok(behavior.length >= 2, `expected several behavior themes, got ${behavior.length}`);
     assert.ok(behavior.every((t) => t.label.length > 0), "every theme must be labeled");
   });
 
   test("windows follow the release tag", () => {
-    assert.deepEqual(world.store.windowsForFacet("behavior"), ["v1.2", "v1.3"]);
+    assert.deepEqual(world.store.windowsForFacet("support-bot", "behavior"), ["v1.2", "v1.3"]);
   });
 });
 
@@ -130,7 +130,7 @@ describe("it finds the planted failure mode", () => {
 describe("it flags the release that made it worse", () => {
   test("the retry loop's share jumps between v1.2 and v1.3", () => {
     const hit = themeFor(world, "behavior", "search-retry-loop")!;
-    const stats = world.store.themeCountsByWindow("behavior");
+    const stats = world.store.themeCountsByWindow("support-bot", "behavior");
     const shareIn = (w: string) => (stats.counts.get(w)?.get(hit.theme.id) ?? 0) / (stats.totals.get(w) ?? 1);
 
     assert.ok(shareIn("v1.2") < 0.05, `v1.2 share was ${shareIn("v1.2")}`);
@@ -139,7 +139,7 @@ describe("it flags the release that made it worse", () => {
 
   test("the delta report surfaces it above the noise", () => {
     const hit = themeFor(world, "behavior", "search-retry-loop")!;
-    const report = world.pipeline.delta("behavior", "v1.2", "v1.3");
+    const report = world.pipeline.delta("support-bot", "behavior", "v1.2", "v1.3");
     const finding = report.findings.find((f) => f.themeId === hit.theme.id);
 
     assert.ok(finding, "the regression is missing from the delta report entirely");
@@ -150,7 +150,7 @@ describe("it flags the release that made it worse", () => {
   test("it is at or near the top of what needs attention", () => {
     const hit = themeFor(world, "behavior", "search-retry-loop")!;
     const attention = world.pipeline
-      .delta("behavior", "v1.2", "v1.3")
+      .delta("support-bot", "behavior", "v1.2", "v1.3")
       .findings.filter((f) => f.severity !== "info");
     assert.ok(
       attention.slice(0, 2).some((f) => f.themeId === hit.theme.id),
@@ -161,7 +161,7 @@ describe("it flags the release that made it worse", () => {
   test("a theme nobody touched does not move", () => {
     const billing = themeFor(world, "goal", "billing-resolved");
     if (!billing) return; // goal-facet grouping is looser; nothing to assert
-    const finding = world.pipeline.delta("goal", "v1.2", "v1.3").findings.find((f) => f.themeId === billing.theme.id);
+    const finding = world.pipeline.delta("support-bot", "goal", "v1.2", "v1.3").findings.find((f) => f.themeId === billing.theme.id);
     assert.ok(!finding || Math.abs(finding.delta) < 0.08, "steady traffic should not look like a change");
   });
 });
@@ -182,12 +182,12 @@ describe("the loop closes", () => {
 
   test("resolving it, then seeing it again, is a regression", () => {
     const hit = themeFor(world, "behavior", "search-retry-loop")!;
-    world.pipeline.registry.resolve(hit.theme.id, "fixed by adding backoff");
+    world.pipeline.registryFor("support-bot").resolve(hit.theme.id, "fixed by adding backoff");
     assert.equal(world.store.getTheme(hit.theme.id)!.state, "resolved");
 
     // next week's traffic still contains it
     const summary = world.store.summariesForFacet("behavior").find((s) => world.records.get(s.traceId)?.scenario === "search-retry-loop")!;
-    const result = world.pipeline.registry.assign(summary, "v1.4");
+    const result = world.pipeline.registryFor("support-bot").assign(summary, "v1.4");
 
     assert.equal(result.themeId, hit.theme.id, "the same behavior must land on the same theme");
     assert.deepEqual(result.transition, { themeId: hit.theme.id, from: "resolved", to: "regressed" });
@@ -197,7 +197,7 @@ describe("the loop closes", () => {
 describe("the report a human reads", () => {
   test("renders an issues list naming the regression", () => {
     const hit = themeFor(world, "behavior", "search-retry-loop")!;
-    const output = renderIssuesList(buildFacetReport(world.store, world.pipeline.cfg, { facet: "behavior" }), {
+    const output = renderIssuesList(buildFacetReport(world.store, world.pipeline.cfg, { agentId: "support-bot", facet: "behavior" }), {
       agentId: "support-bot",
     });
 
@@ -212,7 +212,7 @@ describe("the report a human reads", () => {
 
   test("the residual pile stays small enough that the themes mean something", () => {
     // If most traffic matches nothing, the issues list is decoration.
-    const report = buildFacetReport(world.store, world.pipeline.cfg, { facet: "behavior" });
+    const report = buildFacetReport(world.store, world.pipeline.cfg, { agentId: "support-bot", facet: "behavior" });
     assert.ok(report.residualShare < 0.25, `residual share was ${(report.residualShare * 100).toFixed(1)}%`);
   });
 });

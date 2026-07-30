@@ -19,6 +19,7 @@ export interface DeltaOptions {
 }
 
 export interface DeltaReport {
+  agentId: string;
   facet: string;
   fromWindow: string;
   toWindow: string;
@@ -33,13 +34,14 @@ const SEVERITY_RANK: Record<DeltaSeverity, number> = { regression: 0, new: 1, no
 
 export function computeDeltas(
   store: SiftStore,
+  agentId: string,
   facet: string,
   fromWindow: string,
   toWindow: string,
   opts: DeltaOptions,
 ): DeltaReport {
   const minAbsDelta = opts.minAbsDelta ?? 0.01;
-  const stats = store.themeCountsByWindow(facet);
+  const stats = store.themeCountsByWindow(agentId, facet);
 
   const fromTotal = stats.totals.get(fromWindow) ?? 0;
   const toTotal = stats.totals.get(toWindow) ?? 0;
@@ -110,6 +112,7 @@ export function computeDeltas(
   );
 
   return {
+    agentId,
     facet,
     fromWindow,
     toWindow,
@@ -139,8 +142,8 @@ export interface ThemeSeries {
  * rather than omitted: a sparkline with a hole in it reads as "no data" when
  * the truth is "nothing happened", and those are different stories.
  */
-export function themeSeries(store: SiftStore, facet: string): ThemeSeries {
-  const stats = store.themeCountsByWindow(facet);
+export function themeSeries(store: SiftStore, agentId: string, facet: string): ThemeSeries {
+  const stats = store.themeCountsByWindow(agentId, facet);
   const themeIds = [...allThemeIds(stats)].sort();
 
   const byTheme = new Map<string, SeriesPoint[]>();
