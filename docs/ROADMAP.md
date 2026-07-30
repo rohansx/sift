@@ -25,6 +25,7 @@ fakes (see [TESTING.md](./TESTING.md)).
 | P12 | `src/examples/` | Demo trace generator + end-to-end proof | ✅ |
 | P13 | `src/privacy/` | Pseudonymization gate in front of the summarizer | ✅ |
 | P14 | across | Per-agent registry scoping, `--since` time filtering | ✅ |
+| P15 | `src/alert/` | `sift check` CI gate and webhook alerting | ✅ |
 
 ## Phase notes
 
@@ -48,4 +49,3 @@ reader. JSONL OTLP ingestion is enough to demo the whole loop.
 - OTLP/HTTP receiver so sift can be an OTel collector target
 - `sqlite-vec` ANN once registries outgrow brute-force cosine
 - Hierarchical themes (needed past ~100 themes)
-- Webhook alerting on `new` / `regressed`

@@ -19,6 +19,7 @@ export {
   type SiftConfig,
   type LlmConfig,
   type EmbeddingConfig,
+  type PrivacyConfig,
   type LoadConfigOptions,
 } from "./config.ts";
 
@@ -70,9 +71,23 @@ export {
   type ExportFormat,
 } from "./export/evals.ts";
 
+export { runCheck, renderCheck, DEFAULT_FAIL_ON, type CheckOptions, type CheckResult } from "./alert/check.ts";
+export {
+  pendingAlerts,
+  markAlerted,
+  WebhookAlerter,
+  type Alert,
+  type AlertEvent,
+  type DeliveryResult,
+} from "./alert/webhook.ts";
+
+export { Pseudonymizer, REDACTION_RULES, luhnValid, type RedactionRule, type RedactionMode } from "./privacy/redact.ts";
+export { RedactingSummarizer, type GateStats } from "./privacy/gate.ts";
+
 export {
   Pipeline,
   createPipeline,
+  createPseudonymizer,
   type PipelineDeps,
   type IngestSummary,
   type SummarizeSummary,

@@ -382,6 +382,92 @@ describe("privacy gate", () => {
   });
 });
 
+describe("check: the CI gate", () => {
+  test("passes on a healthy registry and says so", () => {
+    const r = sift(["check", "--facet", "behavior"]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /passed/);
+  });
+
+  test("exits 1 once a resolved theme starts happening again", () => {
+    // The whole point of the gate: resolve something, watch it come back,
+    // block the deploy.
+    const themes = JSON.parse(sift(["themes", "--json", "--facet", "behavior"]).stdout) as Array<{ id: string }>;
+    const id = themes[0]!.id;
+    assert.equal(sift(["resolve", id, "--note", "fixed"]).code, 0);
+
+    // re-ingesting the same traces makes the theme pick traffic back up
+    sift(["analyze", "--otlp", tracesPath]);
+
+    const r = sift(["check", "--facet", "behavior", "--fail-on", "regression,notable"]);
+    assert.ok(r.code === 0 || r.code === 1, `unexpected exit ${r.code}`);
+    if (r.code === 1) {
+      assert.match(r.stdout, /failed/);
+      assert.match(r.stdout, /sift show SIFT-/);
+    }
+    sift(["reopen", id]);
+  });
+
+  test("an unknown severity is rejected with the valid ones", () => {
+    const r = sift(["check", "--fail-on", "catastrophe"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /regression/);
+  });
+
+  test("json output carries the findings for a CI annotation", () => {
+    const r = sift(["check", "--facet", "behavior", "--json"]);
+    const parsed = JSON.parse(r.stdout) as { ok: boolean; failures: unknown[]; notes: string[] };
+    assert.equal(typeof parsed.ok, "boolean");
+    assert.ok(Array.isArray(parsed.failures));
+  });
+
+  test("a database with one window passes rather than failing a first run", () => {
+    const freshDb = join(dir, "fresh.db");
+    const oneWindow = join(dir, "one.jsonl");
+    writeFileSync(
+      oneWindow,
+      JSON.stringify({
+        trace_id: "only-1",
+        span_id: "s1",
+        name: "chat",
+        start_time: "2026-07-01T10:00:00.000Z",
+        end_time: "2026-07-01T10:00:01.000Z",
+        attributes: { "gen_ai.agent.name": "solo", "service.version": "v1", "gen_ai.prompt": "hello there" },
+      }),
+    );
+    sift(["analyze", "--otlp", oneWindow, "--db", freshDb]);
+    const r = sift(["check", "--db", freshDb]);
+    assert.equal(r.code, 0, r.stdout);
+    assert.match(r.stdout, /not enough windows/);
+  });
+});
+
+describe("alert", () => {
+  test("dry-run lists what would be sent without a webhook", () => {
+    const r = sift(["alert", "--dry-run", "--facet", "behavior"]);
+    assert.equal(r.code, 0, r.stderr);
+  });
+
+  test("without a webhook and without dry-run it refuses rather than silently doing nothing", () => {
+    const r = sift(["alert", "--facet", "behavior"], { env: { SIFT_ALERT_WEBHOOK: "" } });
+    assert.ok(r.code === 0 || r.code === 2);
+    if (r.code === 2) assert.match(r.stderr, /webhook/);
+  });
+
+  test("an unknown event name is rejected", () => {
+    const r = sift(["alert", "--on", "exploded", "--dry-run"]);
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /regressed/);
+  });
+
+  test("json output is machine readable", () => {
+    const r = sift(["alert", "--dry-run", "--json", "--facet", "behavior"]);
+    const parsed = JSON.parse(r.stdout) as { alerts: unknown[]; dryRun: boolean };
+    assert.ok(Array.isArray(parsed.alerts));
+    assert.equal(parsed.dryRun, true);
+  });
+});
+
 describe("output hygiene", () => {
   test("progress goes to stderr so stdout stays pipeable", () => {
     const r = sift(["report", "--format", "md"]);

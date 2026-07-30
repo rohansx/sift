@@ -11,6 +11,9 @@ import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
 
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
+import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../alert/check.ts";
+import { pendingAlerts, markAlerted, WebhookAlerter, type Alert, type AlertEvent } from "../alert/webhook.ts";
+import type { DeltaSeverity } from "../types.ts";
 import { THEME_STATES, type ThemeState } from "../types.ts";
 
 /**
@@ -36,6 +39,8 @@ PIPELINE
 VIEWS
   report        the issues list
   delta         what changed between two windows
+  check         exit non-zero when a theme regressed (for CI)
+  alert         send new/regressed themes to a webhook, once each
   themes        list themes, optionally filtered by state
   show          one theme in detail, with exemplar traces
 
@@ -66,6 +71,8 @@ EXAMPLES
   sift report
   sift delta --from v1.2 --to v1.3 --facet behavior
   sift export SIFT-14 --format mastra-scorer --out scorers/retry.ts
+  sift check --fail-on regression        # exits 1 if something regressed
+  sift alert --webhook $SLACK_URL
 
 Set SIFT_LLM_PROVIDER=fake and SIFT_EMBED_PROVIDER=hash to run the whole
 pipeline offline with no API keys.
@@ -96,6 +103,11 @@ const OPTIONS = {
   label: { type: "string" },
   limit: { type: "string" },
   since: { type: "string" },
+  "fail-on": { type: "string" },
+  "min-share": { type: "string" },
+  webhook: { type: "string" },
+  on: { type: "string" },
+  "dry-run": { type: "boolean" },
   traces: { type: "string" },
   seed: { type: "string" },
   strict: { type: "boolean" },
@@ -179,6 +191,10 @@ async function run(command: string, ctx: Ctx): Promise<number> {
       return withPipeline(ctx, cmdReport);
     case "delta":
       return withPipeline(ctx, cmdDelta);
+    case "check":
+      return withPipeline(ctx, cmdCheck);
+    case "alert":
+      return withPipeline(ctx, cmdAlert);
     case "themes":
       return withPipeline(ctx, cmdThemes);
     case "show":
@@ -437,6 +453,103 @@ function cmdDelta(pipeline: Pipeline, ctx: Ctx): number {
   return 0;
 }
 
+/**
+ * The CI gate. Exit 1 on findings so a deploy pipeline can block on behavior
+ * nobody wrote an eval for yet.
+ */
+function cmdCheck(pipeline: Pipeline, ctx: Ctx): number {
+  const failOn = parseSeverities(typeof ctx.values["fail-on"] === "string" ? ctx.values["fail-on"] : undefined);
+  if (failOn === null) return 2;
+
+  const opts: Parameters<typeof runCheck>[1] = { failOn };
+  if (typeof ctx.values.facet === "string") opts.facet = ctx.values.facet;
+  if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
+  if (typeof ctx.values.from === "string") opts.from = ctx.values.from;
+  if (typeof ctx.values.to === "string") opts.to = ctx.values.to;
+  const minShare = floatOption(ctx, "min-share");
+  if (minShare !== undefined) opts.minShare = minShare;
+
+  const result = runCheck(pipeline, opts);
+  if (ctx.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  else process.stdout.write(renderCheck(result));
+  return result.ok ? 0 : 1;
+}
+
+function parseSeverities(raw: string | undefined): DeltaSeverity[] | null {
+  if (!raw) return DEFAULT_FAIL_ON;
+  const allowed: DeltaSeverity[] = ["regression", "new", "notable", "info"];
+  const parsed = raw.split(",").map((s) => s.trim()).filter(Boolean) as DeltaSeverity[];
+  for (const s of parsed) {
+    if (!allowed.includes(s)) {
+      process.stderr.write(`unknown severity ${JSON.stringify(s)}; expected one of ${allowed.join(", ")}\n`);
+      return null;
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Sends new and regressed themes to a webhook, at most once each per window.
+ * Deduplication is the point: an hourly cron must not page repeatedly for one
+ * unchanged fact.
+ */
+async function cmdAlert(pipeline: Pipeline, ctx: Ctx): Promise<number> {
+  const url = typeof ctx.values.webhook === "string" ? ctx.values.webhook : process.env.SIFT_ALERT_WEBHOOK;
+  const events = parseEvents(typeof ctx.values.on === "string" ? ctx.values.on : undefined);
+  if (events === null) return 2;
+
+  const agents = typeof ctx.values.agent === "string" ? [ctx.values.agent] : pipeline.agents();
+  const facets = typeof ctx.values.facet === "string" ? [ctx.values.facet] : pipeline.facets.map((f) => f.name);
+
+  const alerts: Alert[] = [];
+  for (const agentId of agents) {
+    for (const facet of facets) alerts.push(...pendingAlerts(pipeline.store, { agentId, facet, on: events }));
+  }
+
+  // --dry-run shows what would go out without marking anything as sent
+  const dryRun = ctx.values["dry-run"] === true;
+  if (!url) {
+    if (!dryRun) {
+      process.stderr.write("alert needs a webhook: --webhook <url> or SIFT_ALERT_WEBHOOK\n");
+      return 2;
+    }
+  }
+
+  if (ctx.json) process.stdout.write(`${JSON.stringify({ alerts, dryRun }, null, 2)}\n`);
+  else if (alerts.length === 0) process.stdout.write("nothing new to alert on\n");
+  else {
+    for (const a of alerts) {
+      process.stdout.write(`${a.event.toUpperCase()}  ${a.themeId}  ${a.label}  (${a.agentId}/${a.facet}, ${a.window})\n`);
+    }
+  }
+
+  if (dryRun || alerts.length === 0) return 0;
+
+  const alerter = new WebhookAlerter(url!);
+  const result = await alerter.send(alerts);
+  if (result.error) {
+    // Delivery failed, so nothing is marked sent and the next run retries.
+    process.stderr.write(`alert delivery failed: ${result.error}\n`);
+    return 1;
+  }
+  markAlerted(pipeline.store, alerts);
+  if (!ctx.json) process.stdout.write(`delivered ${result.delivered} alerts\n`);
+  return 0;
+}
+
+function parseEvents(raw: string | undefined): AlertEvent[] | null {
+  if (!raw) return ["new", "regressed"];
+  const allowed: AlertEvent[] = ["new", "regressed"];
+  const parsed = raw.split(",").map((s) => s.trim()).filter(Boolean) as AlertEvent[];
+  for (const e of parsed) {
+    if (!allowed.includes(e)) {
+      process.stderr.write(`unknown event ${JSON.stringify(e)}; expected one of ${allowed.join(", ")}\n`);
+      return null;
+    }
+  }
+  return parsed;
+}
+
 function cmdThemes(pipeline: Pipeline, ctx: Ctx): number {
   const stateFilter = typeof ctx.values.state === "string" ? ctx.values.state : undefined;
   if (stateFilter && !THEME_STATES.includes(stateFilter as ThemeState)) {
@@ -588,6 +701,14 @@ function resolveAgent(pipeline: Pipeline, ctx: Ctx): string | null {
     `this database holds several agents (${agents.join(", ")}); pick one with --agent <name>\n`,
   );
   return null;
+}
+
+function floatOption(ctx: Ctx, name: string): number | undefined {
+  const raw = ctx.values[name];
+  if (typeof raw !== "string") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`--${name} must be a number, got ${JSON.stringify(raw)}`);
+  return n;
 }
 
 function intOption(ctx: Ctx, name: string): number | undefined {

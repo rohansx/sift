@@ -34,16 +34,34 @@ A theme gets a stable ID (`SIFT-14`) and a state machine: `new → active → re
 **3. Deltas, not snapshots.**
 The actionable question is never "what are my themes." It's "what changed since Tuesday's deploy." sift diffs theme distributions across time windows and versions, and flags regressions.
 
-**4. Close the loop into evals.**
+**4. It can block a deploy.**
+Evals are a build step because they catch failures you already knew about. Discovery catches the ones you didn't — and until it can also fail a build, it stays something someone has to remember to go and look at.
+
+```
+$ sift check --fail-on regression
+
+  ✗ sift check failed — 1 finding
+
+    REGRESSED  SIFT-20  retry loop: called search_kb repeatedly after timeouts
+      2.0% → 15.0% between v1.2 and v1.3
+      sift show SIFT-20
+
+$ echo $?
+1
+```
+
+Regressions only, by default: gating on anything *new* would turn every release red and teach everyone to ignore the gate. `sift alert --webhook $URL` pushes the same events to Slack or a pager, once per theme per window — an hourly cron must not page twenty-four times for one regression.
+
+**5. Close the loop into evals.**
 `sift export SIFT-14 --format mastra-scorer` turns a failure theme into eval cases seeded from the real traces in that cluster. Discovery → known failure → regression test → resolved. That loop is the product; the clusters are just the intake. It also answers "are these themes real": a theme is validated when fixing it moves a metric.
 
-**5. OTel-native, framework-agnostic.**
+**6. OTel-native, framework-agnostic.**
 Consumes [GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) spans from anywhere: Mastra storage, Langfuse export, Phoenix, OpenLIT, raw OTLP. Not locked to any framework's cloud.
 
-**6. Configurable facets.**
+**7. Configurable facets.**
 Chat agents need `goal / outcome / behavior / sentiment`. Batch pipelines have no sentiment. Coding agents need `files-touched / test-outcome`. Facets are per-agent-type config with presets, not a fixed schema.
 
-**7. Local-first, with a privacy gate in front of the model.**
+**8. Local-first, with a privacy gate in front of the model.**
 Single SQLite file, embeddings can run locally, summaries can point at any OpenAI-compatible endpoint including your own. Traces are the most PII-dense artifact your company produces. They shouldn't need to leave your infra to be understood.
 
 When summaries *do* go to a hosted model, a pseudonymization pass rewrites identifiers first — emails, phone numbers, Luhn-valid card numbers, IPs, API keys, UUIDs, URL query strings. It's on by default, and you can see exactly what it does before trusting it:
@@ -89,6 +107,10 @@ sift export SIFT-14 --format mastra-scorer --out scorers/retry.ts
 
 sift show SIFT-14                    # exemplar traces for one theme
 sift resolve SIFT-14 --note "fixed in v1.4"
+
+sift check --fail-on regression      # exits 1 in CI if something regressed
+sift alert --webhook $SLACK_URL      # notify once per theme per window
+sift privacy --otlp ./traces.jsonl   # preview what the gate strips
 ```
 
 `sift help` lists everything. Every stage is resumable: `summarize` only touches
@@ -137,9 +159,11 @@ top of the release delta, and reports `resolved → regressed` when the behavior
 comes back.
 
 **Not there yet:** no UI, no Sankey view, no Mastra-storage or Langfuse-API
-readers (JSONL OTLP only), no OTLP/HTTP receiver, no alerting, and no `--since`
-time filtering on the CLI. Discovery is brute-force cosine, which is fine into
-the tens of thousands of traces and will want `sqlite-vec` past that.
+readers (JSONL OTLP only), and no OTLP/HTTP receiver — sift reads exported
+spans, it is not yet a collector target. Discovery is brute-force cosine, which
+is fine into the tens of thousands of traces and will want `sqlite-vec` past
+that. Redaction covers structured identifiers; names and free-text personal
+detail need NER, not regexes.
 
 **A caveat about the offline mode:** `SIFT_LLM_PROVIDER=fake` uses rule-based
 summaries, not a model. It is real enough to demo and to test the machinery
