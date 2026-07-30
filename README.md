@@ -51,21 +51,35 @@ Single SQLite file, embeddings can run locally, summaries can point at any OpenA
 ```bash
 npm install -g @siftlabs/sift        # (placeholder scope)
 
-# point it at traces
-sift ingest --otlp ./traces.jsonl              # OTLP JSON lines
-sift ingest --mastra ./mastra.db               # Mastra libsql storage
-
-# bootstrap: summarize → embed → discover themes
-sift bootstrap --agent support-bot --preset chat
-
-# steady state: assign new traces to existing themes (cheap, incremental)
-sift assign --since 24h
-
-# read the results
-sift report --format md > report.md
-sift delta --from v1.2 --to v1.3
-sift export SIFT-14 --format mastra-scorer
+# see it work first — no API key needed
+export SIFT_LLM_PROVIDER=fake SIFT_EMBED_PROVIDER=hash
+sift demo --out ./traces.jsonl       # synthetic traffic with planted failures
+sift analyze --otlp ./traces.jsonl   # ingest → summarize → embed → discover
+sift delta --facet behavior          # what changed between the two releases
 ```
+
+Against your own traces, point the summarizer at a real model:
+
+```bash
+export SIFT_LLM_API_KEY=...          # any Anthropic or OpenAI-compatible endpoint
+export SIFT_EMBED_API_KEY=...
+
+sift ingest --otlp ./traces.jsonl    # OTLP GenAI spans as JSON lines
+sift summarize --preset chat         # 1 LLM call per trace, resumable
+sift bootstrap                       # discover themes
+sift assign                          # steady state: cheap, incremental
+
+sift report --format md > report.md
+sift delta --from v1.2 --to v1.3 --facet behavior
+sift export SIFT-14 --format mastra-scorer --out scorers/retry.ts
+
+sift show SIFT-14                    # exemplar traces for one theme
+sift resolve SIFT-14 --note "fixed in v1.4"
+```
+
+`sift help` lists everything. Every stage is resumable: `summarize` only touches
+traces missing a facet, `assign` only touches summaries without an assignment,
+so an interrupted run never pays twice.
 
 ## Architecture
 
@@ -97,7 +111,43 @@ sift export SIFT-14 --format mastra-scorer
 
 ## Status
 
-Early. The pipeline runs end to end; the registry and delta logic are the parts under active work. See [docs/OVERVIEW.md](docs/OVERVIEW.md) for the full design and roadmap.
+v0, and honest about it. The whole loop works end to end — ingest, facet
+summaries, embeddings, discovery, the theme registry with lifecycle, deltas,
+and eval export — behind a CLI, with no runtime dependencies and a test suite
+that runs entirely offline.
+
+The end-to-end test is the claim in miniature: it plants a failure mode in
+synthetic traffic, hands sift only the spans, and checks that sift isolates it
+(>95% purity, >90% recall against ground truth it never sees), ranks it at the
+top of the release delta, and reports `resolved → regressed` when the behavior
+comes back.
+
+**Not there yet:** no UI, no Sankey view, no Mastra-storage or Langfuse-API
+readers (JSONL OTLP only), no OTLP/HTTP receiver, no alerting, and no `--since`
+time filtering on the CLI. Discovery is brute-force cosine, which is fine into
+the tens of thousands of traces and will want `sqlite-vec` past that.
+
+**A caveat about the offline mode:** `SIFT_LLM_PROVIDER=fake` uses rule-based
+summaries, not a model. It is real enough to demo and to test the machinery
+against, but it echoes phrasing rather than abstracting it, so the `goal` facet
+fragments into one theme per question wording. A real summarizer is what makes
+that facet useful.
+
+See [docs/OVERVIEW.md](docs/OVERVIEW.md) for the design, [docs/ROADMAP.md](docs/ROADMAP.md)
+for what was built in what order, and [docs/TESTING.md](docs/TESTING.md) for how
+to run the suite.
+
+## Development
+
+```bash
+npm install
+npm run check      # typecheck + full test suite
+npm test
+npm run build
+```
+
+Node ≥ 22.18 runs the TypeScript sources directly via type stripping, so there
+is no build step for development and no test framework to install.
 
 ## Prior art
 
