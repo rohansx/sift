@@ -14,11 +14,15 @@ import { ThemeDetail } from "@/views/ThemeDetail";
  * to move between them.
  *
  * Hash routing and not history routing, and not a router library. The reason is
- * on the server: path routing needs an SPA fallback, and a fallback that turns
- * every unknown path into HTML would swallow the receiver's 404s — a mistyped
+ * on the server: this process is also an OTLP collector, and an SPA fallback
+ * that turns every unknown path into HTML would swallow its 404s — a mistyped
  * `/v1/trace` would answer 200 with a dashboard instead of telling an exporter
  * what sift accepts. Nothing after the `#` ever reaches the server, so every one
- * of those messages survives untouched.
+ * of those messages survives untouched, with no route table to keep in sync.
+ * The receiver does have a fallback (`isPageNavigation` in ingest/receiver.ts),
+ * gated on Accept and on the collector's own prefixes so it cannot do that; it
+ * catches stale bookmarks, and it is the thing that would have to be trusted if
+ * this ever moved to history routing. Nothing here generates a URL that needs it.
  */
 
 type Route = { screen: "issues" } | { screen: "delta" } | { screen: "theme"; themeId: string };

@@ -602,6 +602,52 @@ describe("serve", () => {
       child.kill("SIGTERM");
     }
   });
+
+  test("--no-ui leaves the collector and takes the whole read surface with it", async () => {
+    // The dashboard is on by default, so this is the only way to run sift as a
+    // pure sink. It has to take /api too: "no UI" that still serves every
+    // conversation as JSON on the same port is not the thing anyone asked for.
+    const child = spawn(process.execPath, [CLI, "serve", "--port", "0", "--no-ui"], {
+      env: { ...process.env, SIFT_DB: join(dir, "noui.db"), SIFT_LLM_PROVIDER: "fake", SIFT_EMBED_PROVIDER: "hash" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      let banner = "";
+      const url = await new Promise<string>((resolve, reject) => {
+        child.stdout.on("data", (chunk: Buffer) => {
+          banner += chunk.toString();
+          const found = /http:\/\/[^/\s]+/.exec(banner);
+          if (found) resolve(found[0]);
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => reject(new Error(`serve exited with ${code}`)));
+      });
+
+      assert.doesNotMatch(banner, /dashboard/);
+      // Byte-identical to the collector sift was before it had a read side:
+      // /api is not off-with-an-explanation, it is not a route.
+      const api = await fetch(`${url}/api/themes`);
+      assert.equal(api.status, 404);
+      assert.match(((await api.json()) as { error: string }).error, /sift accepts OTLP\/JSON traces/);
+
+      const page = await fetch(`${url}/`, { headers: { accept: "text/html" } });
+      assert.equal(page.status, 404);
+
+      assert.equal((await fetch(`${url}/healthz`)).status, 200);
+    } finally {
+      child.kill("SIGTERM");
+    }
+  });
+
+  test("help states the flag surface the dashboard is behind", () => {
+    const { stdout } = sift(["help"]);
+    assert.match(stdout, /--no-ui/);
+    assert.match(stdout, /dashboard at \/ and its JSON on \/api/);
+    assert.match(stdout, /on by default/);
+    // A checkout has to be told the page needs building once; the tarball ships
+    // it prebuilt, and the help is read from both.
+    assert.match(stdout, /npm run build:ui/);
+  });
 });
 
 describe("output hygiene", () => {

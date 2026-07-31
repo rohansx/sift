@@ -156,11 +156,12 @@ function get(url: string, path: string, headers: Record<string, string> = {}): P
 }
 
 /** A GET whose path reaches the server exactly as written, escapes and all. */
-function raw(url: string, path: string): Promise<string> {
+function raw(url: string, path: string, accept?: string): Promise<string> {
   const { hostname, port } = new URL(url);
   return new Promise((resolve, reject) => {
     const socket = connect({ host: hostname, port: Number(port) }, () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: sift.invalid\r\nConnection: close\r\n\r\n`);
+      const acceptLine = accept === undefined ? "" : `Accept: ${accept}\r\n`;
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: sift.invalid\r\n${acceptLine}Connection: close\r\n\r\n`);
     });
     const chunks: Buffer[] = [];
     socket.on("data", (c: Buffer) => chunks.push(c));
@@ -474,6 +475,100 @@ describe("the dashboard page is served from memory", () => {
     const res = await get(url, "/");
     assert.equal(res.status, 404);
     assert.match(await errorOf(res), /not built in this checkout; run `npm run build:ui`/);
+  });
+
+  test("uiBuilt is what `sift serve` reports at startup instead of leaving it to that 404", async (t) => {
+    // The whole point of the flag: a checkout that never built the UI should
+    // learn so from the banner, not from opening a browser ten minutes later.
+    const store = new SiftStore(":memory:");
+    const pipeline = new Pipeline(store, { ...DEFAULT_CONFIG, dbPath: ":memory:" }, {
+      summarizer: new KeywordSummarizer(),
+      embedder: new HashEmbedder(64),
+      labeler: new StubLabeler(),
+    });
+    t.after(() => store.close());
+
+    const unbuilt = await startReceiver({ store, port: 0, pipeline, uiRoot: join(tmpdir(), "sift-ui-nope") });
+    assert.equal(unbuilt.uiBuilt, false);
+    await unbuilt.close();
+
+    const built = await startReceiver({ store, port: 0, pipeline, uiRoot: fixtureUi(t) });
+    assert.equal(built.uiBuilt, true);
+    await built.close();
+
+    // --no-ui: no pipeline reaches the receiver, so there is no page to report.
+    const collector = await startReceiver({ store, port: 0, uiRoot: fixtureUi(t) });
+    assert.equal(collector.uiBuilt, false);
+    await collector.close();
+  });
+
+  test("an unknown path a browser asked for falls back to index.html", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    // A stale bookmark, or a client route if the app ever leaves hash routing.
+    const res = await get(url, "/theme/SIFT-14", { accept: "text/html,application/xhtml+xml,*/*;q=0.8" });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(await res.text(), INDEX_HTML);
+    // Not /assets/, so it revalidates: this URL is not content-hashed.
+    assert.equal(res.headers.get("cache-control"), "no-cache");
+  });
+
+  test("the fallback never covers a path the collector or the API owns", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+    const browser = { accept: "text/html,application/xhtml+xml,*/*;q=0.8" };
+
+    // The whole reason the fallback is gated. A mistyped exporter endpoint
+    // opened in a browser must still say what sift accepts; answering 200 with
+    // a dashboard would hide the only message that fixes the exporter.
+    const mistyped = await get(url, "/v1/trace", browser);
+    assert.equal(mistyped.status, 404);
+    assert.match(await errorOf(mistyped), /sift accepts OTLP\/JSON traces/);
+
+    // A hashed asset URL from a cached index.html that a later build deleted.
+    // HTML here surfaces as `Unexpected token '<'` and blames the bundler.
+    const stale = await get(url, "/assets/index-gone999.js", browser);
+    assert.equal(stale.status, 404);
+
+    const api = await get(url, "/api/nope", browser);
+    assert.equal(api.status, 404);
+    assert.match(await errorOf(api), /the dashboard API is/);
+
+    // /healthz keeps answering JSON to a probe that happens to accept HTML.
+    const health = await get(url, "/healthz", browser);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json() as { status: string }).status, "ok");
+  });
+
+  test("a client that did not ask for HTML gets the collector's 404, not a page", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    // curl and every OTLP exporter send a wildcard Accept or none. This is what
+    // keeps the fallback from turning every unknown path into 200 text/html.
+    const res = await get(url, "/theme/SIFT-14");
+    assert.equal(res.status, 404);
+    assert.match(await errorOf(res), /no such endpoint/);
+  });
+
+  test("the fallback does not give traversal a way back in", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    // The traversal paths again, now carrying a browser's Accept — the header
+    // that turns the fallback on. Adding a fallback is where static servers
+    // usually reintroduce the bug they just fixed, by resolving the path to
+    // pick a file. This one can only ever hand back assets.get("/"), so the
+    // worst outcome is the dashboard: public bytes, and never a file read.
+    for (const path of [
+      "/%2e%2e/%2e%2e/etc/passwd",
+      "/assets/../../../../etc/passwd",
+      "/..%5c..%5cwindows%5cwin.ini",
+      "/index.html/../../etc/passwd",
+    ]) {
+      const res = await raw(url, path, "text/html");
+      assert.doesNotMatch(res, /root:/, path);
+      assert.doesNotMatch(res, /\[fonts\]/, path);
+      if (/^HTTP\/1\.1 200 /.test(res)) assert.ok(res.endsWith(INDEX_HTML), path);
+    }
   });
 
   test("the page is off wherever /api is off", async (t) => {

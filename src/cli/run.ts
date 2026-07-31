@@ -13,6 +13,7 @@ import { parseOtlpJsonl } from "../ingest/otlp.ts";
 import type { FlushOptions } from "../ingest/pending.ts";
 import { startReceiver, DEFAULT_PORT } from "../ingest/receiver.ts";
 import { isLoopback } from "../serve/http.ts";
+import { UI_NOT_BUILT } from "../serve/static.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
 import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../alert/check.ts";
 import { pendingAlerts, markAlerted, WebhookAlerter, type Alert, type AlertEvent } from "../alert/webhook.ts";
@@ -35,8 +36,11 @@ USAGE
 PIPELINE
   ingest        read OTLP GenAI spans (JSON lines) into the local database
   serve         receive OTLP/JSON spans over HTTP; be a collector target, and
-                serve the read-only dashboard at / and its JSON on /api
-                (loopback, or --token — the page shows raw trace text)
+                serve the read-only dashboard at / and its JSON on /api.
+                Both are on by default — --no-ui takes them off — and both stay
+                off unless the bind is loopback or --token is set, because the
+                page shows raw trace text. The dashboard ships prebuilt; from a
+                git checkout it needs \`npm run build:ui\` once.
   summarize     facet-summarize and embed traces that do not have summaries yet
   bootstrap     discover themes from everything not yet assigned
   assign        assign new traces to existing themes; re-discover on residual pressure
@@ -81,6 +85,9 @@ GLOBAL OPTIONS
   --settle <seconds>   serve: quiet period after a trace's last span before it
                        is assembled (default 30)
   --max-body <bytes>   serve: reject bodies over this (default 4194304)
+  --no-ui              serve: collector only. The dashboard and /api are on by
+                       default; this takes both off, for a receiver that should
+                       have no read surface at all.
   --db <path>          sqlite database (default ./sift.db, env SIFT_DB)
   --config <path>      config file (default ./sift.config.json)
   --preset <name>      facet preset: chat | pipeline | coding | support
@@ -140,6 +147,7 @@ const OPTIONS = {
   token: { type: "string" },
   settle: { type: "string" },
   "max-body": { type: "string" },
+  "no-ui": { type: "boolean" },
   strict: { type: "boolean" },
   json: { type: "boolean" },
   color: { type: "boolean" },
@@ -378,14 +386,19 @@ function cmdIngest(pipeline: Pipeline, ctx: Ctx): number {
  */
 async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   const settleMs = (intOption(ctx, "settle") ?? 30) * 1000;
+  // On by default: a dashboard behind a flag is a dashboard nobody finds, and
+  // the assets are already in the tarball whether or not they get served.
+  // --no-ui withholds the pipeline entirely, which is what makes the receiver
+  // byte-identical to the collector it was before there was a read side.
+  const ui = ctx.values["no-ui"] !== true;
   const opts: Parameters<typeof startReceiver>[0] = {
     store: pipeline.store,
     port: intOption(ctx, "port") ?? DEFAULT_PORT,
-    // The same pipeline the flush timer below uses, so /api reads the database
-    // this process is writing rather than opening a second handle to it.
-    pipeline,
     log: (m) => process.stderr.write(`${m}\n`),
   };
+  // The same pipeline the flush timer below uses, so /api reads the database
+  // this process is writing rather than opening a second handle to it.
+  if (ui) opts.pipeline = pipeline;
   if (typeof ctx.values.host === "string") opts.host = ctx.values.host;
   const maxBody = intOption(ctx, "max-body");
   if (maxBody !== undefined) opts.maxBodyBytes = maxBody;
@@ -394,7 +407,7 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
 
   // The receiver applies this same rule; it is repeated here only so the banner
   // never advertises a URL that answers 404, which is worse than saying nothing.
-  const readable = opts.host === undefined || isLoopback(opts.host) || Boolean(token);
+  const readable = ui && (opts.host === undefined || isLoopback(opts.host) || Boolean(token));
 
   const receiver = await startReceiver(opts);
   process.stdout.write(
@@ -404,16 +417,29 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
       `the protocol line is not optional: the SDK default is protobuf and sift ships no decoder for it.\n` +
       `spans are staged and assembled ${settleMs / 1000}s after a trace's last span.\n` +
       `this command only receives — run \`sift analyze\` to summarize and cluster.\n` +
-      (readable
+      (readable && receiver.uiBuilt
         ? `\nread-only dashboard: ${receiver.url}  (JSON at ${receiver.url}/api/themes)\n` +
           (token ? `open it as ${receiver.url}/?token=<the token> — the page cannot send a bearer on a navigation.\n` : "")
         : ""),
   );
+  // Said here, at startup, rather than left to the 404 the page would give.
+  // Nobody installing from npm can reach this — the tarball carries dist/ui —
+  // so the reader is in a checkout and the fix is one command. The receiver
+  // keeps running either way: refusing spans because a browser page is unbuilt
+  // would be a worse failure than the one being reported.
+  if (readable && !receiver.uiBuilt) {
+    process.stderr.write(
+      `\n${UI_NOT_BUILT}\n` +
+        `/api is up at ${receiver.url}/api/themes regardless; pass --no-ui to stop asking for the page.\n`,
+    );
+  }
   if (opts.host !== undefined && !isLoopback(opts.host) && !token) {
     process.stderr.write(
       `warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces.\n` +
-        `the dashboard and /api stay off in this configuration — they serve raw trace text, and "anyone can write\n` +
-        `traces" is not the same sentence as "anyone can read every conversation". Pass --token to enable them.\n`,
+        (ui
+          ? `the dashboard and /api stay off in this configuration — they serve raw trace text, and "anyone can write\n` +
+            `traces" is not the same sentence as "anyone can read every conversation". Pass --token to enable them.\n`
+          : ""),
     );
   }
 

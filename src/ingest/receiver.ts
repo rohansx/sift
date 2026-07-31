@@ -70,6 +70,12 @@ const DASHBOARD_OFF =
 export interface Receiver {
   port: number;
   url: string;
+  /**
+   * Whether there was a dashboard to load. False both when none was asked for
+   * and when dist/ui is missing; `sift serve` knows which it did and says so at
+   * startup rather than leaving the reader to find out from a 404.
+   */
+  uiBuilt: boolean;
   close(): Promise<void>;
 }
 
@@ -113,6 +119,7 @@ export async function startReceiver(opts: ReceiverOptions): Promise<Receiver> {
   return {
     port: boundPort,
     url: `http://${host.includes(":") ? `[${host}]` : host}:${boundPort}`,
+    uiBuilt: api?.assets.has("/") === true,
     close: () =>
       new Promise<void>((resolve, reject) => {
         // Keep-alive sockets would otherwise hold the process open long after
@@ -156,14 +163,16 @@ async function handle(
   // carries no data, and /api above still refuses without the bearer, which the
   // page then asks the reader for. A cookie session would fix the asymmetry and
   // drag CSRF back into a read-only surface to do it.
-  // Only `/` and paths that are actually assets are claimed here. Everything
-  // else falls through to the collector's own 404, so a mistyped `/v1/trace`
-  // still answers with what sift accepts instead of with a web page.
-  if (api && (req.method === "GET" || req.method === "HEAD") && (path === "/" || api.assets.has(path))) {
-    if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
-    const asset = api.assets.get(path);
-    if (asset) return serveAsset(req, res, asset, path);
-    return send(res, 404, { error: UI_NOT_BUILT });
+  if (api && (req.method === "GET" || req.method === "HEAD")) {
+    const asset = api.assets.get(path) ?? (isPageNavigation(req, path) ? api.assets.get("/") : undefined);
+    // `/` is claimed even with nothing to serve, so that a checkout without a
+    // build gets the sentence naming the build command instead of the
+    // collector's "no such endpoint /".
+    if (asset !== undefined || path === "/") {
+      if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
+      if (asset === undefined) return send(res, 404, { error: UI_NOT_BUILT });
+      return serveAsset(req, res, asset, path);
+    }
   }
 
   if (path === "/v1/metrics" || path === "/v1/logs") {
@@ -238,6 +247,30 @@ async function handle(
       errorMessage: `${rejected} span(s) carried no trace id and were dropped; the rest were accepted`,
     },
   });
+}
+
+/**
+ * Whether an unmatched path should fall back to index.html — the SPA fallback.
+ *
+ * Two gates, and both are load-bearing. **Reserved prefixes** keep the fallback
+ * off every path the collector and the API own: without that, a mistyped
+ * `/v1/trace` would answer 200 with a web page instead of the 404 that names
+ * what sift accepts, which is the single most useful error this server emits.
+ * `/assets/` is reserved for the same reason inverted — a stale URL from a
+ * cached index.html must 404, because HTML served as JavaScript surfaces as
+ * `Unexpected token '<'` and sends the reader looking at their bundler.
+ *
+ * **Accept: text/html** narrows it the rest of the way to actual navigations.
+ * An exporter sends a wildcard Accept or none at all, so every message above
+ * survives even on a reserved-prefix miss. curl does too, which is why the
+ * traversal tests still see a 404. The app routes on the hash today and never
+ * mints such a URL, so nothing here is on its hot path; it is what keeps a
+ * stale bookmark, or a later move to history routing, off a JSON error page.
+ */
+function isPageNavigation(req: IncomingMessage, path: string): boolean {
+  if (path === "/healthz" || path === "/api" || path.startsWith("/api/")) return false;
+  if (path.startsWith("/v1/") || path.startsWith("/assets/")) return false;
+  return String(req.headers.accept ?? "").includes("text/html");
 }
 
 function toPendingSpan(span: OtlpSpan, receivedAt: string): PendingSpan {

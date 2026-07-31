@@ -134,6 +134,14 @@ state is unaffected: discovery only ever runs on one window's residuals.
 Per OVERVIEW §5, if time runs short: no UI, no Sankey, no Mastra-storage
 reader. JSONL OTLP ingestion is enough to demo the whole loop.
 
+**The UI came back off the cut line.** It was cut because "UI" meant a Next.js
+app — a second process, a second install, and a runtime dependency tree against
+a README whose headline is that there is none. What shipped avoids all three:
+React/Tailwind/Radix are devDependencies, Vite compiles the three read-only
+screens into `dist/ui` at publish time, and `sift serve` hands those bytes out
+of a Map from `node:http`. On by default, `--no-ui` to disable, no extra port
+and no extra process. Sankey and the Mastra-storage reader stay cut.
+
 ## After v0
 
 - OTLP/protobuf, if a decoder can be had without a runtime dependency

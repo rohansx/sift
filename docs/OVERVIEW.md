@@ -110,7 +110,7 @@ The category's obvious implementation is Python (BERTopic, UMAP, HDBSCAN). sift 
 | Assignment | nearest centroid, cosine, running-mean updates | the workhorse |
 | Storage | SQLite (node:sqlite, Node ≥22) | single file; sqlite-vec was pencilled in for ANN, and measurement says not yet — assignment is linear and spends its time reloading centroids, not searching them |
 | CLI | node:util `parseArgs` | commander was the plan; it would have made the dependency list non-empty for argv splitting |
-| UI (later) | Next.js issues-list | not in v0; markdown reports first |
+| UI | Vite + React + shadcn/ui, compiled to static assets, served by `sift serve` from `node:http` | planned as a Next.js app and cut for that reason — a second process and a runtime dependency tree. Build-time only: devDependencies, prebuilt into `dist/ui`, on by default and `--no-ui` to disable. Read-only; every mutation is still a CLI command |
 
 ## 5. Build plan (7 days)
 
@@ -122,6 +122,8 @@ The category's obvious implementation is Python (BERTopic, UMAP, HDBSCAN). sift 
 | 7 | Demo: 2-3 Mastra example agents, ~2k generated traces with injected-but-realistic failure modes (tool that times out on long inputs; prompt that drops instructions past a context length). Loom of sift finding them unprompted. |
 
 Cut line if behind: UI never; Sankey never (v0); Mastra-storage reader can slip (JSONL OTLP is enough for the demo).
+
+*What actually happened:* the plan above held through day 7 and the UI landed after it, once it was clear the read-only screens could be static assets rather than a server — see the UI row in §4. Sankey and the Mastra-storage reader are still cut.
 
 ## 6. The demo that sells it
 

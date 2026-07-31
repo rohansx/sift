@@ -107,11 +107,17 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=http/json          # not optional — see bel
 
 `sift serve` also puts the issues list, the theme pages and the release delta on
 `http://127.0.0.1:4318` — the same numbers `sift report` and `sift delta` print,
-rendered from the same code. It is prebuilt into `dist/` at publish time and
-served as static bytes from `node:http`, so it adds nothing to the runtime
-dependency set: React, Tailwind and Radix are build-time tools that never reach
-your `node_modules`. It is served only on a loopback bind or behind `--token`,
-because the theme pages show raw trace text — which is your users' conversations.
+rendered from the same code. It is on by default and needs no build step, no
+second process and no port of its own; the startup banner prints the URL. It is
+prebuilt into `dist/` at publish time and served as static bytes from
+`node:http`, so it adds nothing to the runtime dependency set: React, Tailwind
+and Radix are build-time tools that never reach your `node_modules`. It is
+served only on a loopback bind or behind `--token`, because the theme pages show
+raw trace text — which is your users' conversations. `--no-ui` turns off the
+page and `/api` together, for a receiver that should have no read surface.
+
+From a git checkout there is nothing prebuilt, so run `npm run build:ui` once —
+`sift serve` says so at startup rather than leaving you to find a 404.
 
 `serve` only receives: spans are staged in SQLite, assembled into a trace 30s
 after that trace's last span (a `BatchSpanProcessor` flushes one conversation
@@ -216,9 +222,10 @@ a hosted model is assumed to have, and one theme per *phrasing* at 21% recall
 with the local hash embedder.
 
 **Not there yet:** no Sankey view, and no Mastra-storage or Langfuse-API
-readers. The dashboard is read-only — resolve, mute, reopen and relabel are CLI
-commands, so there is no write path to the browser and no CSRF story to get
-wrong. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
+readers. The dashboard is three screens — issues, one theme, the release delta —
+and it is read-only: resolve, mute, reopen and relabel are CLI commands, so
+there is no write path to the browser and no CSRF story to get wrong. It routes
+on the hash, which is also why the server needs no route table for it. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
 default `http/protobuf` gets a 415 telling it to switch, not a decoder. Ids
 arrive as sent, so an exporter that base64s them instead of hex-encoding them
 (the spec says hex for JSON) gives you trace ids that will not match your other
