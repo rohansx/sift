@@ -118,6 +118,21 @@ describe("maxTokensFor", () => {
     await new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl }).summarize(TRACE, facets);
     assert.equal(fetchStub.calls[0]!.body.max_tokens, 960);
   });
+
+  test("llm.maxTokens overrides the scaling, for the summarizer and the labeler", async () => {
+    // The scaling counts facets, which is the wrong axis for a reasoning model:
+    // its thinking comes out of this same budget, so 480 tokens buys no answer
+    // at all — on every trace, on every run, at full price. Without a knob the
+    // truncation message's advice ("use fewer facets") cannot fix it.
+    const cfg = { ...DEFAULT_CONFIG.llm, maxTokens: 4000 };
+    const fetchStub = stubFetch([{ body: anthropicBody('{"goal":"a"}') }]);
+    await new AnthropicSummarizer(cfg, { fetchImpl: fetchStub.impl }).summarize(TRACE, FACETS);
+    assert.equal(fetchStub.calls[0]!.body.max_tokens, 4000);
+
+    const labelStub = stubFetch([{ body: anthropicBody('{"label":"a","description":"b"}') }]);
+    await new HttpLabeler(cfg, { fetchImpl: labelStub.impl }).label("goal", ["a summary"]);
+    assert.equal(labelStub.calls[0]!.body.max_tokens, 4000);
+  });
 });
 
 describe("truncation", () => {
@@ -128,6 +143,9 @@ describe("truncation", () => {
     const fetchStub = stubFetch([{ body: { content: [{ type: "text", text: '{"goal":"a' }], stop_reason: "max_tokens" } }]);
     const s = new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl });
     await assert.rejects(() => s.summarize(TRACE, FACETS), /truncated at 400 tokens/);
+    // The advice has to name a lever that exists: "use fewer facets" alone is
+    // no help at one facet, which still gets the 400-token floor.
+    await assert.rejects(() => s.summarize(TRACE, FACETS), /SIFT_LLM_MAX_TOKENS/);
   });
 
   test("openai finish_reason length is reported as truncation", async () => {

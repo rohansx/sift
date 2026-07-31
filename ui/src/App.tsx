@@ -4,7 +4,7 @@ import { setToken, useApi, type Meta } from "@/api";
 import { Picker } from "@/components/picker";
 import { Failure, Pending } from "@/components/query-state";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Delta } from "@/views/Delta";
 import { Issues } from "@/views/Issues";
 import { ThemeDetail } from "@/views/ThemeDetail";
@@ -29,9 +29,23 @@ type Route = { screen: "issues" } | { screen: "delta" } | { screen: "theme"; the
 
 function parseRoute(hash: string): Route {
   const theme = /^#\/theme\/(.+)$/.exec(hash);
-  if (theme) return { screen: "theme", themeId: decodeURIComponent(theme[1]!) };
+  if (theme) return { screen: "theme", themeId: decodeSegment(theme[1]!) };
   if (hash === "#/delta") return { screen: "delta" };
   return { screen: "issues" };
+}
+
+/**
+ * decodeURIComponent throws URIError on a malformed escape ("#/theme/100%"),
+ * and this runs inside a render — an unhandled throw there unmounts the tree and
+ * leaves a blank page. The raw segment misses the lookup and 404s instead, which
+ * is the same call src/serve/api.ts makes about the server-side id.
+ */
+function decodeSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 function useRoute(): Route {
@@ -66,33 +80,45 @@ export default function App() {
     <Shell dbPath={dbPath}>
       {currentAgent === undefined || currentFacet === undefined ? (
         <Empty dbPath={dbPath} />
+      ) : route.screen === "theme" ? (
+        // No tablist here: a theme page is not one of the tabs, and a tablist
+        // showing "Issues" selected while a theme is on screen is a lie to a
+        // screen reader. The page carries its own "← all themes" link.
+        <ThemeDetail themeId={route.themeId} />
       ) : (
-        <>
+        // The screens live inside <Tabs> so each trigger's aria-controls points
+        // at a real tabpanel, and onValueChange is what makes arrow keys move
+        // the selection rather than only the focus: Radix activates on arrow by
+        // default, and a controlled value with no handler throws that away.
+        <Tabs
+          value={route.screen}
+          onValueChange={(value) => {
+            window.location.hash = value === "delta" ? "#/delta" : "#/";
+          }}
+          className="gap-5"
+        >
           <nav className="flex flex-wrap items-center justify-between gap-3">
-            <Tabs value={route.screen === "delta" ? "delta" : "issues"}>
-              <TabsList variant="line">
-                <TabsTrigger value="issues" onClick={() => (window.location.hash = "#/")}>
-                  Issues
-                </TabsTrigger>
-                <TabsTrigger value="delta" onClick={() => (window.location.hash = "#/delta")}>
-                  Delta
-                </TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <TabsList variant="line">
+              <TabsTrigger value="issues">Issues</TabsTrigger>
+              <TabsTrigger value="delta">Delta</TabsTrigger>
+            </TabsList>
             <div className="flex flex-wrap items-center gap-3">
               <Picker label="agent" value={currentAgent} options={agents} onChange={setAgent} />
               <Picker label="facet" value={currentFacet} options={facets} onChange={setFacet} />
             </div>
           </nav>
 
-          {route.screen === "theme" ? (
-            <ThemeDetail themeId={route.themeId} />
-          ) : route.screen === "delta" ? (
-            <Delta agent={currentAgent} facet={currentFacet} />
-          ) : (
-            <Issues agent={currentAgent} facet={currentFacet} />
-          )}
-        </>
+          {/* Keyed by the scope, so changing agent or facet remounts the screen.
+              A chosen window (or a from/to pair) belongs to the scope it was
+              picked in; carried across, it 404s on a window the new scope does
+              not have, and the picker that could undo it is below the error. */}
+          <TabsContent value="issues">
+            <Issues key={`${currentAgent}/${currentFacet}`} agent={currentAgent} facet={currentFacet} />
+          </TabsContent>
+          <TabsContent value="delta">
+            <Delta key={`${currentAgent}/${currentFacet}`} agent={currentAgent} facet={currentFacet} />
+          </TabsContent>
+        </Tabs>
       )}
     </Shell>
   );

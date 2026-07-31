@@ -20,5 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # Before the tests, not after: dist/ is gitignored, so a fresh checkout has
+      # no dashboard, and the serve banner says a different thing when there is
+      # none. Building first is what makes CI test the shape a user installs.
       - run: npm run build
+      - run: npm test

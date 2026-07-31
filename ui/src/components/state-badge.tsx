@@ -16,7 +16,10 @@ const TONE: Record<ThemeState, string> = {
   active: "",
   new: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400",
   resolved: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-  muted: "text-muted-foreground",
+  // No text-muted-foreground here: over `secondary`'s background that is 4.35:1
+  // in light mode, under the 4.5:1 AA floor for 12px text. `secondary` already
+  // reads as dim without making the word unreadable to anyone.
+  muted: "",
 };
 
 function variantFor(state: ThemeState) {

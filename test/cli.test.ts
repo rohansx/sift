@@ -556,10 +556,16 @@ describe("serve", () => {
         child.once("exit", (code) => reject(new Error(`serve exited with ${code}`)));
       });
 
-      // On loopback the read side is on, so the banner says where. It must not
-      // print that line when the bind turns /api off — an advertised URL that
-      // 404s is worse than no line at all.
-      assert.match(banner, /read-only dashboard: .*\(JSON at .*\/api\/themes\)/);
+      // On loopback the read side is on, so the banner says where — but only
+      // when there is a page to point at. dist/ is gitignored and `npm test`
+      // does not build, so this asserts the branch rather than the line: an
+      // advertised URL that 404s is worse than no line at all, and so is a test
+      // that only passes on a machine that happened to build recently.
+      if (existsSync(fileURLToPath(new URL("../dist/ui/index.html", import.meta.url)))) {
+        assert.match(banner, /read-only dashboard: .*\(JSON at .*\/api\/themes\)/);
+      } else {
+        assert.doesNotMatch(banner, /read-only dashboard:/);
+      }
 
       const anonymous = JSON.stringify({
         resourceSpans: [
@@ -693,6 +699,17 @@ describe("doctor: the preflight", () => {
     assert.equal(r.code, 1);
     assert.match(r.stdout, /✗ coherence/);
     assert.match(r.stdout, /SIFT_LLM_BASE_URL/);
+  });
+
+  test("--timeout is a real flag that reaches the probe deadline", () => {
+    // The 10s default is the documented local-model recipe's problem: a 4B
+    // reasoning model on CPU misses it and gets reported as a broken endpoint.
+    // Zero seconds is the one value the flag refuses, and refusing it proves
+    // the flag was parsed and handed to runDoctor rather than silently ignored.
+    const r = sift(["doctor", "--timeout", "0"]);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /--timeout must be a positive number of seconds/);
+    assert.equal(sift(["doctor", "--timeout", "60"]).code, 0);
   });
 
   test("--price-in and --price-out override the table", () => {

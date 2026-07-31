@@ -14,7 +14,26 @@ export function send(res: ServerResponse, status: number, body: unknown, headers
   res.end(payload);
 }
 
-/** Whether a bind address is reachable only from this machine. */
+/** Whether an address is reachable only from this machine. The whole /8, because 127.0.0.2 is as local as .1. */
 export function isLoopback(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * Whether the *name the client used* is a loopback name — which is a different
+ * question from where the socket is bound, and the only one that catches DNS
+ * rebinding.
+ *
+ * A page on evil.test can re-point that name at 127.0.0.1 and then read this
+ * server as its own origin: no preflight, no CORS header needed, and the bind
+ * address is still loopback. What the attacker cannot change is the Host header
+ * the browser must send to reach the rebound name. Missing Host fails closed —
+ * HTTP/1.1 requires one, so its absence is a hand-written request, not a browser.
+ */
+export function hostHeaderIsLoopback(host: string | undefined): boolean {
+  if (host === undefined) return false;
+  // `[::1]:4318` -> `::1`, `127.0.0.1:4318` -> `127.0.0.1`; a bare IPv6 without
+  // brackets is not legal in a Host header, so splitting on ":" is safe here.
+  const hostname = /^\[(.+)\]/.exec(host)?.[1] ?? host.split(":")[0]!;
+  return isLoopback(hostname);
 }

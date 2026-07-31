@@ -46,6 +46,13 @@ export interface LlmConfig {
   baseUrl: string;
   apiKey?: string;
   model: string;
+  /**
+   * Output tokens one call may produce; defaults to a figure scaled by facet
+   * count (see maxTokensFor). A reasoning model spends this budget on thinking
+   * before it writes any JSON, so the default can leave it with nothing left —
+   * and a truncated reply fails that trace on every run, forever, at full price.
+   */
+  maxTokens?: number;
 }
 
 export interface EmbeddingConfig {
@@ -259,6 +266,7 @@ function envConfig(env: Record<string, string | undefined>): DeepPartial<SiftCon
   assign(llm, "baseUrl", str("SIFT_LLM_BASE_URL"));
   assign(llm, "apiKey", str("SIFT_LLM_API_KEY"));
   assign(llm, "model", str("SIFT_LLM_MODEL"));
+  assign(llm, "maxTokens", num("SIFT_LLM_MAX_TOKENS"));
 
   assign(embeddings, "provider", str("SIFT_EMBED_PROVIDER"));
   assign(embeddings, "baseUrl", str("SIFT_EMBED_BASE_URL"));
@@ -325,6 +333,9 @@ export function validateConfig(cfg: SiftConfig): void {
     problems.push(`deltaSigma must be a non-negative number, got ${JSON.stringify(cfg.deltaSigma)}`);
   }
   intAtLeast("embeddings.dimensions", cfg.embeddings.dimensions, 1);
+  // 16 is below any useful answer, but the floor is there to catch a unit
+  // mix-up (0.5, or seconds), not to have an opinion about the model.
+  if (cfg.llm.maxTokens !== undefined) intAtLeast("llm.maxTokens", cfg.llm.maxTokens, 16);
 
   const providers: Array<[string, string, readonly string[]]> = [
     ["llm.provider", cfg.llm.provider, ["anthropic", "openai", "fake"]],

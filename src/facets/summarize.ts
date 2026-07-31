@@ -109,14 +109,20 @@ function braceCandidates(text: string, cap = 32): string[] {
 }
 
 /**
- * The output budget, scaled by facet count. A fixed 400 truncated a six-facet
- * reply mid-string, which `parseFacetJson` could only report as a parse error —
- * on every trace, every run, forever, because a failed trace stays pending and
- * gets paid for again.
+ * The output budget, scaled by facet count, and overridable because the scaling
+ * cannot see the model. A fixed 400 truncated a six-facet reply mid-string,
+ * which `parseFacetJson` could only report as a parse error — on every trace,
+ * every run, forever, because a failed trace stays pending and gets paid for
+ * again. A reasoning model reaches the same dead end from the other side: its
+ * thinking is spent from this same budget, and 480 tokens of it buys no answer
+ * at all. `llm.maxTokens` (SIFT_LLM_MAX_TOKENS) is the way out of that.
  */
-export function maxTokensFor(facets: FacetDef[]): number {
-  return Math.max(400, 120 * facets.length);
+export function maxTokensFor(facets: FacetDef[], configured?: number): number {
+  return configured ?? Math.max(400, 120 * facets.length);
 }
+
+/** What the labeler asks for: one label and one sentence, unless the config says otherwise. */
+const LABEL_MAX_TOKENS = 200;
 
 /**
  * Truncation is not a parse error and must not be reported as one: the reply is
@@ -126,7 +132,8 @@ function assertNotTruncated(reason: string | undefined, maxTokens: number): void
   if (reason === "max_tokens" || reason === "length") {
     throw new Error(
       `model output was truncated at ${maxTokens} tokens before the JSON closed — ` +
-        `use fewer facets or shorter facet instructions`,
+        `raise it with SIFT_LLM_MAX_TOKENS (a reasoning model spends this budget on thinking before it answers), ` +
+        `or use fewer facets`,
     );
   }
 }
@@ -237,7 +244,10 @@ function wantsMaxCompletionTokens(err: unknown): boolean {
 
 export class AnthropicSummarizer extends HttpLlm implements Summarizer {
   async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
-    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), maxTokensFor(facets));
+    const text = await this.complete(
+      buildFacetPrompt(trace, facets, this.maxTraceChars),
+      maxTokensFor(facets, this.cfg.maxTokens),
+    );
     return toSummaries(trace, facets, parseFacetJson(text));
   }
 
@@ -248,7 +258,10 @@ export class AnthropicSummarizer extends HttpLlm implements Summarizer {
 
 export class OpenAiSummarizer extends HttpLlm implements Summarizer {
   async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
-    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), maxTokensFor(facets));
+    const text = await this.complete(
+      buildFacetPrompt(trace, facets, this.maxTraceChars),
+      maxTokensFor(facets, this.cfg.maxTokens),
+    );
     return toSummaries(trace, facets, parseFacetJson(text));
   }
 
@@ -275,7 +288,7 @@ export class HttpLabeler extends HttpLlm implements Labeler {
       sample,
     ].join("\n");
 
-    const text = await this.complete(prompt, 200);
+    const text = await this.complete(prompt, this.cfg.maxTokens ?? LABEL_MAX_TOKENS);
     const parsed = parseFacetJson(text);
     const fallback = fallbackLabel(memberSummaries);
     return {

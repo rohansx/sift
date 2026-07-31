@@ -93,9 +93,14 @@ function ExemplarCard({ exemplar }: { exemplar: Exemplar }) {
         {exemplar.summary !== null && <p className="text-sm">{exemplar.summary}</p>}
       </CardHeader>
       <CardContent>
-        {/* max-h, not h: most traces are a dozen lines, and a fixed box would
-            put five empty panes on the page for every long one it fits. */}
-        <ScrollArea className="max-h-64 rounded-lg border bg-muted/30">
+        {/* h, not max-h. Radix's viewport is `size-full`, and a percentage
+            height against a Root that only has a max-height resolves to auto:
+            the viewport grew to the whole trace, rendered no scrollbar, and
+            painted straight through the border and over the caption below.
+            shadcn documents this component with a fixed height for that reason;
+            the cost is an empty pane under a short trace, which is the cheaper
+            of the two failures. */}
+        <ScrollArea className="h-64 rounded-lg border bg-muted/30">
           {/* break-all, not break-words: a trace is often one enormous JSON line
               with no spaces in it, and without this the page scrolls sideways. */}
           <pre className="p-3 font-mono text-xs whitespace-pre-wrap break-all">{trace.text}</pre>

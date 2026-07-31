@@ -52,6 +52,7 @@ export interface DoctorOptions {
   fetchImpl?: typeof fetch;
   /** false runs zero network calls; config and cost checks still run */
   probe?: boolean;
+  /** how long one probe may take; `sift doctor --timeout <seconds>` sets it */
   timeoutMs?: number;
   agentId?: string;
   since?: string;
@@ -64,9 +65,11 @@ export interface DoctorOptions {
 
 /**
  * A preflight must report a rate limit in seconds, not sit in backoff for a
- * minute, so probes get one attempt and a short deadline.
+ * minute, so probes get one attempt and a short deadline. `--timeout` raises it,
+ * which is not optional generosity: docs/COST.md's zero-cost recipe is a 4B
+ * reasoning model on CPU, and that answers in tens of seconds, not ten.
  */
-const PROBE_TIMEOUT_MS = 10_000;
+export const PROBE_TIMEOUT_MS = 10_000;
 
 /** Synthetic, and it stays synthetic: a preflight must never ship a user's trace. */
 const PROBE_TRACE: Trace = {
@@ -276,9 +279,29 @@ async function llmProbe(cfg: SiftConfig, facets: FacetDef[], opts: ProbeOptions)
       name,
       status: "fail",
       detail: `${cfg.llm.model} at ${cfg.llm.baseUrl}: ${describeError(err)}`,
-      fix: "check SIFT_LLM_BASE_URL, SIFT_LLM_MODEL and SIFT_LLM_API_KEY",
+      // A deadline is not a misconfiguration, and saying "check your base URL"
+      // to someone whose base URL is right sends them to fix what is not broken.
+      fix: timedOut(err) ? tooSlow(opts.timeoutMs) : "check SIFT_LLM_BASE_URL, SIFT_LLM_MODEL and SIFT_LLM_API_KEY",
     };
   }
+}
+
+/**
+ * Whether the probe ran out of clock rather than failing.
+ *
+ * AbortSignal.timeout rejects with a TimeoutError DOMException, which fetch
+ * re-throws directly or wraps as the `cause` of "fetch failed".
+ */
+function timedOut(err: unknown): boolean {
+  const names = [err, err instanceof Error ? err.cause : undefined];
+  return names.some((e) => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError"));
+}
+
+function tooSlow(timeoutMs: number): string {
+  return (
+    `no answer within ${Math.round(timeoutMs / 1000)}s — the settings above may all be right. ` +
+    `Retry with \`sift doctor --timeout 60\`; a local reasoning model on CPU spends most of that thinking`
+  );
 }
 
 /**
@@ -320,6 +343,7 @@ async function embedProbe(cfg: SiftConfig, opts: ProbeOptions): Promise<DoctorCh
     // The embedder's own error already states both widths; all doctor adds is
     // the env var, which is the entire difference between a puzzle and a fix.
     if (width) check.fix = `SIFT_EMBED_DIMENSIONS=${width[1]} (a registry already built at ${cfg.embeddings.dimensions} cannot be extended at ${width[1]})`;
+    else if (timedOut(err)) check.fix = tooSlow(opts.timeoutMs);
     else check.fix = "check SIFT_EMBED_BASE_URL, SIFT_EMBED_MODEL and SIFT_EMBED_API_KEY";
     return check;
   }

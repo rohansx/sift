@@ -25,8 +25,11 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # Build first: see ci.yml. `npm publish` runs prepack and would build
+      # again anyway; doing it here is what puts a broken build before the tag
+      # check rather than after it.
       - run: npm run build
+      - run: npm test
 
       # A tag that disagrees with package.json publishes the wrong version, and
       # npm makes that permanent. Cheaper to fail here than to discover it in

@@ -80,6 +80,8 @@ GLOBAL OPTIONS
   --allow-partial      let check pass over a corpus that is not fully
                        summarized yet (it fails on one by default)
   --no-probe           doctor: config and cost only, zero network calls
+  --timeout <seconds>  doctor: how long one probe may take (default 10). A
+                       local model on CPU needs more; a hosted one never does.
   --price-in <usd>     doctor: USD per 1M input tokens, overriding the table
   --price-out <usd>    doctor: USD per 1M output tokens
   --port <n>           serve: listen port (default 4318, the OTLP/HTTP one)
@@ -145,6 +147,7 @@ const OPTIONS = {
   "min-share": { type: "string" },
   "allow-partial": { type: "boolean" },
   "no-probe": { type: "boolean" },
+  timeout: { type: "string" },
   "price-in": { type: "string" },
   "price-out": { type: "string" },
   webhook: { type: "string" },
@@ -503,6 +506,14 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
 async function cmdDoctor(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   const opts: DoctorOptions = { store: pipeline.store, keySources: keySources(ctx.cfg) };
   if (ctx.values["no-probe"] === true) opts.probe = false;
+  const timeout = floatOption(ctx, "timeout");
+  if (timeout !== undefined) {
+    // Zero would abort every probe before it left the socket and report it as
+    // an endpoint that never answered, which is the failure this flag exists
+    // to stop misreporting.
+    if (timeout <= 0) throw new Error(`--timeout must be a positive number of seconds, got ${timeout}`);
+    opts.timeoutMs = timeout * 1000;
+  }
   if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
   if (typeof ctx.values.since === "string") opts.since = Pipeline.resolveSince(ctx.values.since);
   const priceIn = floatOption(ctx, "price-in");

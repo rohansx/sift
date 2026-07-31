@@ -121,7 +121,7 @@ sift doctor
 npm test          # test/live.test.ts now runs instead of skipping
 ```
 
-Three things that will bite you, in the order they bite:
+Four things that will bite you, in the order they bite:
 
 1. **No `/v1` on the base URL.** sift appends `/v1/chat/completions` and
    `/v1/embeddings` itself. `http://127.0.0.1:11434/v1` becomes
@@ -133,6 +133,13 @@ Three things that will bite you, in the order they bite:
    `nomic-embed-text`, and getting it wrong used to surface only after a page of
    summaries had already been paid for. `sift doctor` now catches it in one call
    and names the variable.
+4. **`qwen3:4b` thinks before it answers, and thinking is slow and metered.** On
+   CPU it will not finish inside doctor's 10s probe deadline: run
+   `sift doctor --timeout 60`. Its `<think>` block is also spent from the same
+   output budget as the answer, so a reply that never reaches the JSON is
+   reported as truncation on every trace, every run — raise it with
+   `SIFT_LLM_MAX_TOKENS=4000` (the default is scaled by facet count, which
+   cannot see that the model reasons).
 
 Alternatives, same shape: `docker run -p 8080:80
 ghcr.io/huggingface/text-embeddings-inference` for embeddings only, or

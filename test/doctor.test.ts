@@ -36,10 +36,14 @@ function stubFetch(responses: Array<{ status?: number; body: unknown; headers?: 
   return { impl, calls, get count() { return i; } };
 }
 
-/** Never answers, but honours the abort — a black hole, which is the interesting case. */
+/**
+ * Never answers, but honours the abort — a black hole, which is the interesting
+ * case. It rejects with the signal's own reason (a TimeoutError DOMException),
+ * because that is what undici does and doctor now reads the name off it.
+ */
 const hangingFetch = (async (_url: string | URL, init: RequestInit = {}) =>
   new Promise<Response>((_resolve, reject) => {
-    init.signal?.addEventListener("abort", () => reject(new Error("This operation was aborted")));
+    init.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error));
   })) as unknown as typeof fetch;
 
 const KEY = "sk-ant-secret-value-do-not-print";
@@ -219,6 +223,20 @@ describe("runDoctor: probes", () => {
     assert.equal(check(r, "llm probe").status, "fail");
     assert.match(check(r, "llm probe").detail, /abort/i);
     assert.equal(check(r, "embed probe").status, "fail");
+  });
+
+  test("a slow endpoint is told it was slow, not that its settings are wrong", async () => {
+    // docs/COST.md's zero-cost recipe is a 4B reasoning model on CPU, which
+    // does not finish in the default 10s. Sending that reader to check the base
+    // URL, the model id and the key — all three correct — is the worst possible
+    // advice, and `sift doctor` exiting 1 fails any script that gates on it.
+    const r = await doctor(hostedConfig(), { fetchImpl: hangingFetch, timeoutMs: 25 });
+
+    for (const name of ["llm probe", "embed probe"]) {
+      const fix = check(r, name).fix ?? "";
+      assert.match(fix, /--timeout/, name);
+      assert.doesNotMatch(fix, /SIFT_LLM_BASE_URL|SIFT_EMBED_BASE_URL/, name);
+    }
   });
 });
 

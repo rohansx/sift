@@ -261,6 +261,7 @@ describe("loadConfig env surface", () => {
         SIFT_LLM_BASE_URL: "http://localhost:1234",
         SIFT_LLM_API_KEY: "k1",
         SIFT_LLM_MODEL: "m1",
+        SIFT_LLM_MAX_TOKENS: "4000",
         SIFT_EMBED_PROVIDER: "hash",
         SIFT_EMBED_BASE_URL: "http://localhost:5678",
         SIFT_EMBED_API_KEY: "k2",
@@ -275,7 +276,13 @@ describe("loadConfig env surface", () => {
     assert.equal(cfg.minClusterSize, 7);
     assert.equal(cfg.mergeThreshold, 0.4);
     assert.equal(cfg.deltaSigma, 3);
-    assert.deepEqual(cfg.llm, { provider: "openai", baseUrl: "http://localhost:1234", apiKey: "k1", model: "m1" });
+    assert.deepEqual(cfg.llm, {
+      provider: "openai",
+      baseUrl: "http://localhost:1234",
+      apiKey: "k1",
+      model: "m1",
+      maxTokens: 4000,
+    });
     assert.deepEqual(cfg.embeddings, {
       provider: "hash",
       baseUrl: "http://localhost:5678",
@@ -283,6 +290,17 @@ describe("loadConfig env surface", () => {
       model: "m2",
       dimensions: 256,
     });
+  });
+
+  test("llm.maxTokens is unset by default and refuses a nonsense value", () => {
+    // Unset means "scale it by facet count"; a number means the operator knows
+    // something the scaling cannot see, e.g. that the model thinks before it
+    // answers and spends this budget doing it.
+    assert.equal(loadConfig({ cwd: "/nonexistent", env: {} }).llm.maxTokens, undefined);
+    assert.throws(
+      () => loadConfig({ cwd: "/nonexistent", env: { SIFT_LLM_MAX_TOKENS: "1" } }),
+      /llm.maxTokens must be an integer >= 16/,
+    );
   });
 
   test("defaults do not leak process env into a caller-supplied env", () => {

@@ -131,7 +131,10 @@ rather than a silent drop, because a decoder is several hundred lines of
 hot-path parsing against a moving spec and sift ships no runtime dependencies.
 `--token` (or `SIFT_RECEIVER_TOKEN`) adds a bearer check; the bind is loopback
 by default because an unauthenticated trace sink on `0.0.0.0` is an exfil
-surface.
+surface. The read side goes further: without a token it answers only requests
+whose `Host` is a loopback name, because a loopback bind alone does not stop a
+web page from re-pointing its own hostname at 127.0.0.1 and reading your traces
+as its own origin.
 
 Against your own traces, point the summarizer at a real model:
 

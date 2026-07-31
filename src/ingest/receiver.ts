@@ -6,7 +6,7 @@ import { normalizeSpans, type OtlpSpan } from "./otlp.ts";
 import type { PendingSpan, SiftStore } from "../store/db.ts";
 import type { Pipeline } from "../pipeline.ts";
 import { handleApi } from "../serve/api.ts";
-import { isLoopback, send } from "../serve/http.ts";
+import { hostHeaderIsLoopback, isLoopback, send } from "../serve/http.ts";
 import { loadUiAssets, serveAsset, UI_NOT_BUILT, type Asset } from "../serve/static.ts";
 
 /**
@@ -66,6 +66,20 @@ export interface ReceiverOptions {
 const DASHBOARD_OFF =
   "the dashboard is off: sift is bound to a non-loopback address with no --token, and it serves raw trace text. " +
   "Restart with --token <secret> to enable it.";
+
+/**
+ * The other half of that sentence, for the case where the bind *is* loopback.
+ *
+ * DNS rebinding: any website can point its own hostname at 127.0.0.1, so a page
+ * the user visits reads this server same-origin — CORS never enters into it, and
+ * the read side hands back every conversation in the database. The Host header
+ * is the one thing the attacker has to get wrong, so it is what gets checked.
+ * A --token server is already safe (the attacker's script cannot read one), and
+ * that is the supported way to read the dashboard over a real hostname.
+ */
+const REBINDING =
+  "refusing a dashboard request whose Host header is not a loopback name: this is what DNS rebinding looks like. " +
+  "To read sift over a hostname, restart it with --token <secret> and send it as a bearer.";
 
 export interface Receiver {
   port: number;
@@ -140,6 +154,11 @@ async function handle(
 ): Promise<void> {
   const path = (req.url ?? "/").split("?")[0]!;
 
+  // Applies to the read surface only. The write path keeps taking spans from
+  // whatever hostname an exporter was configured with — "anyone can POST spans"
+  // was always the deal there, and a collector behind a service name is normal.
+  const rebound = token === undefined && !hostHeaderIsLoopback(req.headers.host);
+
   // Left unauthenticated on purpose: a liveness probe that needs a secret is a
   // liveness probe nobody wires up.
   if (path === "/healthz") return send(res, 200, { status: "ok", pendingSpans: store.countPendingSpans() });
@@ -149,6 +168,7 @@ async function handle(
   // keeps every response a plain collector already gives byte-identical.
   if (api && (path === "/api" || path.startsWith("/api/"))) {
     if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
+    if (rebound) return send(res, 403, { error: REBINDING });
     // The same bearer that guards writes guards reads. It has to: the read side
     // hands back the trace text the write side only accepted.
     if (token !== undefined && !tokenMatches(bearer(req), token)) {
@@ -170,6 +190,9 @@ async function handle(
     // collector's "no such endpoint /".
     if (asset !== undefined || path === "/") {
       if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
+      // The bundle carries no data, but serving it to a rebound name is serving
+      // the attacker a debugger for the API they cannot read.
+      if (rebound) return send(res, 403, { error: REBINDING });
       if (asset === undefined) return send(res, 404, { error: UI_NOT_BUILT });
       return serveAsset(req, res, asset, path);
     }

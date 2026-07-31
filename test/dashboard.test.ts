@@ -1,5 +1,6 @@
 import { test, describe, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { request } from "node:http";
 import { connect } from "node:net";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -155,18 +156,57 @@ function get(url: string, path: string, headers: Record<string, string> = {}): P
   return fetch(`${url}${path}`, { headers });
 }
 
-/** A GET whose path reaches the server exactly as written, escapes and all. */
-function raw(url: string, path: string, accept?: string): Promise<string> {
+/**
+ * A GET whose path reaches the server exactly as written, escapes and all.
+ *
+ * The Host header is the real one by default: the read surface refuses a Host
+ * that is not a loopback name (DNS rebinding), so a made-up one here would turn
+ * every traversal assertion below into a test of that guard instead.
+ */
+function raw(url: string, path: string, accept?: string, host?: string): Promise<string> {
   const { hostname, port } = new URL(url);
   return new Promise((resolve, reject) => {
     const socket = connect({ host: hostname, port: Number(port) }, () => {
       const acceptLine = accept === undefined ? "" : `Accept: ${accept}\r\n`;
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: sift.invalid\r\n${acceptLine}Connection: close\r\n\r\n`);
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${host ?? `${hostname}:${port}`}\r\n${acceptLine}Connection: close\r\n\r\n`,
+      );
     });
     const chunks: Buffer[] = [];
     socket.on("data", (c: Buffer) => chunks.push(c));
     socket.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     socket.on("error", reject);
+  });
+}
+
+/**
+ * A request carrying a Host header of our choosing — what a rebound name looks
+ * like on the wire. fetch() computes Host from the URL and forbids overriding it.
+ */
+function withHost(
+  url: string,
+  path: string,
+  host: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; body: string }> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: target.hostname,
+        port: Number(target.port),
+        path,
+        method: opts.method ?? "GET",
+        headers: { ...opts.headers, host },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      },
+    );
+    req.on("error", reject);
+    req.end(opts.body);
   });
 }
 
@@ -392,6 +432,49 @@ describe("the dashboard API is exposed no wider than the write endpoint", () => 
     assert.equal((await get(url, "/api/themes", { authorization: "Bearer s3cret" })).status, 200);
     assert.equal((await get(url, "/api/themes")).status, 401);
   });
+
+  test("a Host header that is not a loopback name is refused: that is DNS rebinding", async (t) => {
+    // The attack the api.off gate does not cover, because the bind stays
+    // 127.0.0.1: evil.test resolves to loopback on its second lookup, the
+    // browser calls it same-origin, and the page reads every conversation
+    // without a preflight or a single CORS header being involved.
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    for (const path of ["/api/themes", "/api/theme/SIFT-14", "/", "/assets/index-abc123.js"]) {
+      const res = await withHost(url, path, "evil.example.com");
+      assert.equal(res.status, 403, path);
+      assert.match(res.body, /DNS rebinding/, path);
+      assert.doesNotMatch(res.body, /where is my refund|tool-retry loop/, path);
+    }
+
+    // Same server, same second: the name is the only thing that changed.
+    assert.equal((await withHost(url, "/api/themes", new URL(url).host)).status, 200);
+    assert.equal((await withHost(url, "/api/themes", "localhost:9999")).status, 200);
+  });
+
+  test("the collector still takes spans from whatever hostname an exporter was given", async (t) => {
+    // The guard is on the read surface only. A collector reached through a
+    // service name is normal, and "anyone can POST spans" was always the deal.
+    const { url } = await serve(t);
+
+    const res = await withHost(url, "/v1/traces", "otel-collector.internal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ resourceSpans: [] }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal((await withHost(url, "/healthz", "otel-collector.internal")).status, 200);
+  });
+
+  test("--token is the supported way to read sift over a real hostname", async (t) => {
+    const { url } = await serve(t, { host: "0.0.0.0", token: "s3cret" });
+
+    const ok = await withHost(url, "/api/themes", "sift.internal", {
+      headers: { authorization: "Bearer s3cret" },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal((await withHost(url, "/api/themes", "sift.internal")).status, 401);
+  });
 });
 
 describe("the dashboard page is served from memory", () => {
@@ -616,6 +699,51 @@ describe("the UI source cannot render trace text as markup", () => {
     for (const file of files) {
       assert.doesNotMatch(readFileSync(file, "utf8"), FORBIDDEN, `${file} reaches around React's escaping`);
     }
+  });
+});
+
+describe("the dashboard screens, where a grep is the only enforcement there is", () => {
+  /**
+   * Four rules that are browser behavior, in a repo with no DOM test framework:
+   * asserting them properly means jsdom, a renderer and a second test runner to
+   * pin four lines. Each of the four was a real bug, so the grep is here to stop
+   * the fix from quietly coming undone — the same trade the FORBIDDEN grep above
+   * makes, and with the same known ceiling.
+   */
+  const read = (p: string) => readFileSync(fileURLToPath(new URL(`../ui/src/${p}`, import.meta.url)), "utf8");
+
+  test("the exemplar ScrollArea has a definite height, or it scrolls nothing", () => {
+    // Radix's viewport is `size-full`, and a percentage height against a Root
+    // that only carries max-h resolves to auto: the box grows to the whole
+    // trace, paints past its own border, and the tail is unreachable.
+    assert.match(read("views/ThemeDetail.tsx"), /<ScrollArea className="h-\d/);
+  });
+
+  test("the tabs own their panels and their selection", () => {
+    const app = read("App.tsx");
+    // Without a TabsContent, every trigger's aria-controls points at an id that
+    // is not on the page. And Radix activates tabs on arrow-key focus, so a
+    // controlled `value` with no onValueChange leaves focus and selection on
+    // different tabs with nothing to reconcile them.
+    assert.match(app, /<TabsContent value="issues">/);
+    assert.match(app, /<TabsContent value="delta">/);
+    assert.match(app, /<Tabs\b[\s\S]{0,200}?onValueChange=/);
+  });
+
+  test("a screen is remounted when its agent or facet changes", () => {
+    // The chosen window belongs to the scope it was picked in. Carried onto
+    // another agent or facet it 404s, and the picker that could clear it is
+    // rendered below the error it caused, so the view soft-locks.
+    assert.match(read("App.tsx"), /key=\{`\$\{currentAgent\}\/\$\{currentFacet\}`\}/);
+  });
+
+  test("the hash is never decoded without a guard", () => {
+    // "#/theme/100%" throws URIError out of a render, which unmounts the tree
+    // and leaves a blank page. src/serve/api.ts declines to decode the same
+    // segment server-side for the same reason.
+    const app = read("App.tsx");
+    assert.match(app, /try \{\s*return decodeURIComponent/);
+    assert.doesNotMatch(app, /themeId: decodeURIComponent/);
   });
 });
 
