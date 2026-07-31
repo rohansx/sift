@@ -37,7 +37,12 @@ The actionable question is never "what are my themes." It's "what changed since 
 **4. It can block a deploy.**
 Evals are a build step because they catch failures you already knew about. Discovery catches the ones you didn't — and until it can also fail a build, it stays something someone has to remember to go and look at.
 
+A regression is a theme you had marked `resolved` picking traffic back up —
+Sentry's meaning, not "went up". So the gate stays quiet until someone has
+actually claimed a fix:
+
 ```
+$ sift resolve SIFT-20 --note "fixed in v1.3"
 $ sift check --fail-on regression
 
   ✗ sift check failed — 1 finding

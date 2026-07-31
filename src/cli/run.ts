@@ -57,8 +57,10 @@ OTHER
   help, version
 
 GLOBAL OPTIONS
-  --agent <name>       act on one agent (required when a database holds several)
-  --since <window>     only traces since an ISO date or a span like 7d, 24h
+  --agent <name>       scope to one agent (otherwise every agent in the database)
+  --since <window>     ISO date or a span like 7d, 24h; picks which traces get
+                       summarized (summarize, analyze). Views are scoped by
+                       window instead — see --window and --from/--to.
   --db <path>          sqlite database (default ./sift.db, env SIFT_DB)
   --config <path>      config file (default ./sift.config.json)
   --preset <name>      facet preset: chat | pipeline | coding | support
@@ -130,7 +132,7 @@ export async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parsed;
   const command = positionals[0];
 
-  if (values.version) {
+  if (values.version || command === "version") {
     process.stdout.write(`${VERSION}\n`);
     return 0;
   }
