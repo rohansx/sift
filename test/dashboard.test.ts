@@ -1,6 +1,10 @@
 import { test, describe, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { connect } from "node:net";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { startReceiver, type ReceiverOptions } from "../src/ingest/receiver.ts";
 import { MAX_TRACE_TEXT } from "../src/serve/api.ts";
@@ -94,6 +98,27 @@ interface World {
   url: string;
 }
 
+/**
+ * A stand-in for `npm run build:ui`, so these tests do not need a Vite run.
+ *
+ * The shape is what matters, not the bytes: a hashed asset under /assets, an
+ * index.html at the root, and a file with an extension the loader is supposed to
+ * ignore. `npm run check` does not build, so pointing at the real dist/ui would
+ * make every assertion here depend on whether someone had built recently.
+ */
+const INDEX_HTML = '<!doctype html><html><body><div id="root"></div></body></html>';
+
+function fixtureUi(t: TestContext): string {
+  const dir = mkdtempSync(join(tmpdir(), "sift-ui-"));
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(join(dir, "index.html"), INDEX_HTML);
+  writeFileSync(join(dir, "assets", "index-abc123.js"), 'console.log("sift")');
+  writeFileSync(join(dir, "assets", "index-def456.css"), ":root{--x:1}");
+  writeFileSync(join(dir, "notes.txt"), "not something to serve");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 async function serve(
   t: TestContext,
   opts: Partial<ReceiverOptions> & { seed?: (s: SiftStore) => void } = {},
@@ -110,7 +135,15 @@ async function serve(
     labeler: new StubLabeler(),
   });
 
-  const receiver = await startReceiver({ store, port: 0, pipeline, ...receiverOpts });
+  // Default to "no UI build", so whether someone has run `npm run build:ui`
+  // never changes what these tests see. The tests that want assets say so.
+  const receiver = await startReceiver({
+    store,
+    port: 0,
+    pipeline,
+    uiRoot: join(tmpdir(), "sift-ui-that-does-not-exist"),
+    ...receiverOpts,
+  });
   t.after(async () => {
     await receiver.close();
     store.close();
@@ -357,6 +390,137 @@ describe("the dashboard API is exposed no wider than the write endpoint", () => 
 
     assert.equal((await get(url, "/api/themes", { authorization: "Bearer s3cret" })).status, 200);
     assert.equal((await get(url, "/api/themes")).status, 401);
+  });
+});
+
+describe("the dashboard page is served from memory", () => {
+  test("/ is index.html, with the caching and the policy the page needs", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    const res = await get(url, "/");
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    // index.html keeps its URL across releases, so it must revalidate: cached
+    // for a year it would point at asset filenames a later build deleted.
+    assert.equal(res.headers.get("cache-control"), "no-cache");
+    assert.match(await res.text(), /id="root"/);
+
+    // The layer under React's escaping. Trace text is arbitrary end-user input,
+    // so an injected <script> must have nowhere to load from either.
+    const csp = res.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /script-src 'self'/);
+    assert.match(csp, /object-src 'none'/);
+    assert.match(csp, /frame-ancestors 'none'/);
+  });
+
+  test("a hashed asset is immutable, and revalidation is a 304", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    const js = await get(url, "/assets/index-abc123.js");
+    assert.equal(js.status, 200);
+    assert.equal(js.headers.get("content-type"), "text/javascript; charset=utf-8");
+    assert.equal(js.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    // No CSP on a script: the header only means anything on the document.
+    assert.equal(js.headers.get("content-security-policy"), null);
+
+    const etag = js.headers.get("etag");
+    assert.ok(etag);
+    const again = await get(url, "/assets/index-abc123.js", { "if-none-match": etag });
+    assert.equal(again.status, 304);
+    assert.equal(await again.text(), "");
+  });
+
+  test("HEAD answers with the headers and no body", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    const res = await fetch(`${url}/`, { method: "HEAD" });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-length"), String(INDEX_HTML.length));
+    assert.equal(await res.text(), "");
+  });
+
+  test("only the extensions Vite emits are loaded at all", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    // notes.txt exists in the fixture directory and is still not a key, so it
+    // falls through to the collector's own 404 rather than being served.
+    const res = await get(url, "/notes.txt");
+    assert.equal(res.status, 404);
+    assert.match(await errorOf(res), /sift accepts OTLP\/JSON traces/);
+  });
+
+  test("traversal is a miss, because there is no path to traverse", async (t) => {
+    const { url } = await serve(t, { uiRoot: fixtureUi(t) });
+
+    // Assets live in a Map keyed by pathname: nothing joins, resolves or reads
+    // per request, so these are typos rather than attacks. Raw sockets because
+    // fetch() normalises %2e%2e away before the request leaves the client.
+    for (const path of [
+      "/%2e%2e/%2e%2e/etc/passwd",
+      "/assets/../../../../etc/passwd",
+      "/..%5c..%5cwindows%5cwin.ini",
+      "/index.html/../../etc/passwd",
+    ]) {
+      const res = await raw(url, path);
+      assert.match(res, /^HTTP\/1\.1 404 /, path);
+      assert.doesNotMatch(res, /root:/, path);
+    }
+  });
+
+  test("no build means a 404 that says what to run, not a crash", async (t) => {
+    const { url } = await serve(t);
+
+    const res = await get(url, "/");
+    assert.equal(res.status, 404);
+    assert.match(await errorOf(res), /not built in this checkout; run `npm run build:ui`/);
+  });
+
+  test("the page is off wherever /api is off", async (t) => {
+    const { url } = await serve(t, { host: "0.0.0.0", uiRoot: fixtureUi(t) });
+
+    const res = await get(url, "/");
+    assert.equal(res.status, 404);
+    assert.match(await errorOf(res), /the dashboard is off:/);
+  });
+
+  test("the page loads without a bearer even when /api needs one", async (t) => {
+    // A browser cannot put an Authorization header on a top-level navigation, so
+    // a tokened server that 401s the HTML is a server whose dashboard nobody can
+    // reach. The bundle carries no data; /api still refuses.
+    const { url } = await serve(t, { token: "s3cret", uiRoot: fixtureUi(t) });
+
+    assert.equal((await get(url, "/")).status, 200);
+    assert.equal((await get(url, "/assets/index-abc123.js")).status, 200);
+    assert.equal((await get(url, "/api/themes")).status, 401);
+  });
+});
+
+describe("the UI source cannot render trace text as markup", () => {
+  /**
+   * Trace text is arbitrary end-user chat input and the most PII-dense thing
+   * sift stores. React escaping it is the actual defence, and this is what stops
+   * someone from opting out of that defence a year from now — there is no eslint
+   * in this repo, so a grep is the enforceable form of the rule.
+   */
+  const FORBIDDEN = /dangerouslySetInnerHTML|\.innerHTML|\beval\(|new Function\(/;
+
+  function sources(dir: string, into: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = join(dir, entry.name);
+      if (entry.isDirectory()) sources(child, into);
+      else if (/\.tsx?$/.test(entry.name)) into.push(child);
+    }
+    return into;
+  }
+
+  test("no innerHTML, no eval, anywhere under ui/src", () => {
+    const root = fileURLToPath(new URL("../ui/src", import.meta.url));
+    const files = sources(root);
+    assert.ok(files.length > 5, "the grep found no UI sources, which would make it vacuous");
+    for (const file of files) {
+      assert.doesNotMatch(readFileSync(file, "utf8"), FORBIDDEN, `${file} reaches around React's escaping`);
+    }
   });
 });
 

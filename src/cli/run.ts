@@ -35,7 +35,8 @@ USAGE
 PIPELINE
   ingest        read OTLP GenAI spans (JSON lines) into the local database
   serve         receive OTLP/JSON spans over HTTP; be a collector target, and
-                serve the read-only issues API on /api (loopback, or --token)
+                serve the read-only dashboard at / and its JSON on /api
+                (loopback, or --token — the page shows raw trace text)
   summarize     facet-summarize and embed traces that do not have summaries yet
   bootstrap     discover themes from everything not yet assigned
   assign        assign new traces to existing themes; re-discover on residual pressure
@@ -87,7 +88,8 @@ GLOBAL OPTIONS
   --no-color           plain output (colour is off by default when piping)
 
 EXAMPLES
-  sift serve                             # then OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+  sift serve                             # collector + dashboard on 127.0.0.1:4318
+                                         # exporters need OTLP_PROTOCOL=http/json
   sift demo --out ./demo-traces.jsonl
   sift analyze --otlp ./demo-traces.jsonl
   sift report
@@ -402,12 +404,16 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
       `the protocol line is not optional: the SDK default is protobuf and sift ships no decoder for it.\n` +
       `spans are staged and assembled ${settleMs / 1000}s after a trace's last span.\n` +
       `this command only receives — run \`sift analyze\` to summarize and cluster.\n` +
-      (readable ? `\nread-only JSON of what has been analyzed so far: ${receiver.url}/api/themes\n` : ""),
+      (readable
+        ? `\nread-only dashboard: ${receiver.url}  (JSON at ${receiver.url}/api/themes)\n` +
+          (token ? `open it as ${receiver.url}/?token=<the token> — the page cannot send a bearer on a navigation.\n` : "")
+        : ""),
   );
   if (opts.host !== undefined && !isLoopback(opts.host) && !token) {
     process.stderr.write(
       `warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces.\n` +
-        `the /api read endpoints stay off in this configuration — they serve raw trace text. Pass --token to enable them.\n`,
+        `the dashboard and /api stay off in this configuration — they serve raw trace text, and "anyone can write\n` +
+        `traces" is not the same sentence as "anyone can read every conversation". Pass --token to enable them.\n`,
     );
   }
 

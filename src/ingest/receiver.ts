@@ -7,6 +7,7 @@ import type { PendingSpan, SiftStore } from "../store/db.ts";
 import type { Pipeline } from "../pipeline.ts";
 import { handleApi } from "../serve/api.ts";
 import { isLoopback, send } from "../serve/http.ts";
+import { loadUiAssets, serveAsset, UI_NOT_BUILT, type Asset } from "../serve/static.ts";
 
 /**
  * OTLP/HTTP receiver: sift as a collector target rather than a file reader.
@@ -50,6 +51,8 @@ export interface ReceiverOptions {
    * server is exactly the collector it has always been, down to the 404 text.
    */
   pipeline?: Pipeline;
+  /** where the prebuilt dashboard lives; defaults to dist/ui, and tests point it at a fixture */
+  uiRoot?: string;
   log?: (message: string) => void;
 }
 
@@ -78,7 +81,14 @@ export async function startReceiver(opts: ReceiverOptions): Promise<Receiver> {
   const api =
     opts.pipeline === undefined
       ? undefined
-      : { pipeline: opts.pipeline, off: !isLoopback(host) && opts.token === undefined };
+      : {
+          pipeline: opts.pipeline,
+          off: !isLoopback(host) && opts.token === undefined,
+          // Read once, here, so a request never touches the filesystem. See
+          // serve/static.ts for why that is the security property and not just
+          // a speed one.
+          assets: loadUiAssets(opts.uiRoot),
+        };
 
   const server = createServer((req, res) => {
     handle(req, res, opts.store, maxBodyBytes, opts.token, api).catch((err: Error) => {
@@ -119,7 +129,7 @@ async function handle(
   store: SiftStore,
   maxBodyBytes: number,
   token: string | undefined,
-  api: { pipeline: Pipeline; off: boolean } | undefined,
+  api: { pipeline: Pipeline; off: boolean; assets: Map<string, Asset> } | undefined,
 ): Promise<void> {
   const path = (req.url ?? "/").split("?")[0]!;
 
@@ -139,6 +149,21 @@ async function handle(
     }
     const query = new URL(req.url ?? "/", "http://sift.invalid").searchParams;
     return handleApi(req, res, api.pipeline, path, query);
+  }
+
+  // The page itself. Unauthenticated even when --token is set, because a browser
+  // cannot put an Authorization header on a top-level navigation — the bundle
+  // carries no data, and /api above still refuses without the bearer, which the
+  // page then asks the reader for. A cookie session would fix the asymmetry and
+  // drag CSRF back into a read-only surface to do it.
+  // Only `/` and paths that are actually assets are claimed here. Everything
+  // else falls through to the collector's own 404, so a mistyped `/v1/trace`
+  // still answers with what sift accepts instead of with a web page.
+  if (api && (req.method === "GET" || req.method === "HEAD") && (path === "/" || api.assets.has(path))) {
+    if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
+    const asset = api.assets.get(path);
+    if (asset) return serveAsset(req, res, asset, path);
+    return send(res, 404, { error: UI_NOT_BUILT });
   }
 
   if (path === "/v1/metrics" || path === "/v1/logs") {

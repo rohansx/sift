@@ -559,7 +559,7 @@ describe("serve", () => {
       // On loopback the read side is on, so the banner says where. It must not
       // print that line when the bind turns /api off — an advertised URL that
       // 404s is worse than no line at all.
-      assert.match(banner, /read-only JSON .*\/api\/themes/);
+      assert.match(banner, /read-only dashboard: .*\(JSON at .*\/api\/themes\)/);
 
       const anonymous = JSON.stringify({
         resourceSpans: [
