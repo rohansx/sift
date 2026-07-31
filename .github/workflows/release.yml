@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# ci.yml is filtered to branches, and a tag push matches no branch — so this
+# workflow is the only gate a published artifact ever passes. It runs the full
+# check itself rather than trusting that the branch build was green.
+permissions:
+  contents: read
+  id-token: write # npm provenance signs against the Actions OIDC token
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The engines floor, so the published dist is the one the oldest
+          # supported Node compiles. ci.yml covers 24.x on every push.
+          node-version: "22.x"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      # A tag that disagrees with package.json publishes the wrong version, and
+      # npm makes that permanent. Cheaper to fail here than to discover it in
+      # the registry.
+      - name: tag must match package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          test "$tag" = "$pkg" || {
+            echo "tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          }
+
+      # --access public: a scoped package defaults to restricted, which fails
+      # on a free account rather than publishing something nobody can install.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

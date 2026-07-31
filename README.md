@@ -258,6 +258,10 @@ npm run bench      # wall time + peak RSS for discovery and assignment, by size
 Node ≥ 22.18 runs the TypeScript sources directly via type stripping, so there
 is no build step for development and no test framework to install.
 
+[CHANGELOG.md](CHANGELOG.md) tracks what is in a version. Nothing is published
+yet, and [RELEASING.md](RELEASING.md) has the decisions that block the first
+publish — starting with the scope above being a placeholder.
+
 ## Prior art
 
 - [Clio](https://arxiv.org/abs/2412.13678) (Anthropic) — the technique. sift is "Clio over OTel spans" with stable grouping.
