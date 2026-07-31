@@ -48,7 +48,7 @@ $EDITOR CHANGELOG.md                       # "unreleased" -> the date
 
 # 2. prove it locally
 npm run check                              # typecheck + full suite
-npm pack                                   # inspect the tarball contents
+npm pack                                   # prepack builds dist/, then inspect
 
 # 3. tag; the workflow does the rest
 git commit -am "release: v0.1.0"
@@ -68,6 +68,12 @@ long after the tag went out.
 `files` in `package.json` is an allowlist: `dist`, `README.md`, `LICENSE`, plus
 `package.json`, which npm always includes. No `src`, no `test`, no `.github`.
 `npm pack --dry-run` prints the manifest — read it, do not assume it.
+
+`dist/` is gitignored and built on demand, so `npm pack` and `npm publish` both
+run it through the `prepack` script. That is deliberate rather than a documented
+step: `dist` is on the `files` allowlist, and a pack that forgot to build ships a
+three-file tarball whose `bin` target does not exist — installable, and dead on
+first run.
 
 `dist/cli.js` is the `bin` target and carries a `#!/usr/bin/env node` shebang,
 which `tsc` preserves. The build then chmods it to 0755. npm's own bin-linking

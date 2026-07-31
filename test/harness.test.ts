@@ -36,8 +36,13 @@ test("package declares the node engine the harness relies on", () => {
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
     engines: { node: string };
     dependencies: Record<string, string>;
+    files: string[];
+    scripts: Record<string, string>;
   };
   assert.match(pkg.engines.node, /^>=22/);
   // Local-first means installable anywhere: sift ships with no runtime deps.
   assert.deepEqual(pkg.dependencies, {});
+  // `dist` is gitignored and on the files allowlist, so without a prepack hook
+  // `npm pack` ships a tarball whose bin target does not exist.
+  if (pkg.files.includes("dist")) assert.ok(pkg.scripts.prepack, "packing must build dist first");
 });

@@ -51,6 +51,29 @@ const span = (traceId: string, over: Record<string, unknown> = {}) =>
     ...over,
   });
 
+/** What `sift serve` leaves in the database: staged spans, already settled. */
+function stage(store: SiftStore, count: number): void {
+  store.stagePendingSpans(
+    Array.from({ length: count }, (_, i) => {
+      const traceId = `rx-${String(i).padStart(5, "0")}`;
+      return {
+        traceId,
+        spanKey: `${traceId}-s`,
+        receivedAt: "2020-01-01T00:00:00.000Z",
+        span: JSON.stringify({
+          traceId,
+          spanId: `${traceId}-s`,
+          name: "chat",
+          startMs: 1_780_000_000_000 + i,
+          endMs: 1_780_000_001_000 + i,
+          attributes: { "gen_ai.agent.name": "support-bot", "service.version": "v1.0", "gen_ai.prompt": "hello" },
+          events: [],
+        }),
+      };
+    }),
+  );
+}
+
 describe("ingest stage", () => {
   test("reports what was new versus already known", () => {
     const { pipeline } = makePipeline();
@@ -228,7 +251,7 @@ describe("analyze covers everything it ingested", () => {
     assert.equal(result.summarize.traces, store.countTraces());
     assert.equal(result.summarize.remaining, 0);
     assert.equal(store.countSummaries("goal"), store.countTraces());
-    assert.equal(store.countUncoveredTraces("support-bot", "goal"), 0);
+    assert.equal(store.countUncoveredTraces("support-bot", ["goal"]), 0);
   });
 
   test("an explicit limit is still a cap, and says what it left", async () => {
@@ -243,10 +266,11 @@ describe("analyze covers everything it ingested", () => {
     assert.equal(store.countSummaries("goal"), 4);
   });
 
-  test("traces that always fail to summarize end the run instead of looping on it", async () => {
-    // Failures stay pending by design, so "loop until nothing is pending"
-    // would retry them forever against a paid API. A regression here fails by
-    // timing out, which is the signal.
+  test("traces that always fail to summarize end the run instead of looping on it", { timeout: 30_000 }, async () => {
+    // Failures stay pending by design, so "loop until nothing is pending" would
+    // retry them forever against a paid API. The timeout is not decoration:
+    // node:test's default is Infinity, so without it a regression here hangs
+    // `npm run check` to the CI job ceiling instead of reporting a failure.
     const broken: Summarizer = {
       async summarize(): Promise<FacetSummary[]> {
         throw new Error("model refused");
@@ -259,6 +283,81 @@ describe("analyze covers everything it ingested", () => {
     assert.equal(result.summarize.failures.length, 3);
     assert.equal(result.summarize.traces, 3, "one pass only: nothing moved, so nothing is retried");
     assert.equal(result.summarize.remaining, 3);
+  });
+
+  test("a block of failures costs one model call each, not one per pass", { timeout: 60_000 }, async () => {
+    // The bug this pins: paging re-asked for "the oldest pending traces", and
+    // a failure stays pending, so every pass re-fetched and re-paid for the
+    // whole failing block. 999 failures ahead of 21 healthy traces cost ~21,000
+    // model calls to produce 21 summaries. It must cost 1,020.
+    let calls = 0;
+    const ids = Array.from({ length: 1020 }, (_, i) => `t${String(i).padStart(4, "0")}`);
+    const flaky: Summarizer = {
+      async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
+        calls++;
+        if (trace.id < "t0999") throw new Error("model refused");
+        return facets.map((f) => ({ traceId: trace.id, facet: f.name, summary: `ok ${trace.id} ${f.name}` }));
+      },
+    };
+    const { pipeline, store } = makePipeline({ facets: [FACETS[0]!] }, flaky);
+    pipeline.ingestJsonl(ids.map((id) => span(id)).join("\n"));
+
+    const result = await pipeline.analyze({});
+    assert.equal(calls, 1020, "every pending trace should be offered to the summarizer exactly once");
+    assert.equal(result.summarize.failures.length, 999);
+    assert.equal(store.countSummaries("goal"), 21);
+    assert.equal(result.summarize.remaining, 999);
+  });
+
+  test("a corpus that arrived as staged spans is assembled whole, not one flush page of it", { timeout: 60_000 }, async () => {
+    // What `sift serve` leaves behind. flushSettledTraces caps at 1000 traces
+    // per call, so a single flush is a page, not the corpus: analyze used to
+    // count that page as the whole population and stop after one batch, with no
+    // failures, no error and exit 0.
+    const { pipeline, store } = makePipeline({ facets: [FACETS[0]!] });
+    stage(store, 3000);
+
+    const result = await pipeline.analyze({});
+    assert.equal(store.countTraces(), 3000);
+    assert.equal(store.countPendingSpans(), 0);
+    assert.equal(result.summarize.remaining, 0);
+    assert.equal(store.countSummaries("goal"), 3000);
+  });
+
+  test("summarize assembles staged spans too, so `sift serve` then `sift summarize` sees them", async () => {
+    const { pipeline, store } = makePipeline({ facets: [FACETS[0]!] });
+    stage(store, 3);
+
+    const result = await pipeline.summarize();
+    assert.equal(result.traces, 3, "staged spans were never turned into traces");
+    assert.equal(store.countSummaries("goal"), 3);
+  });
+
+  test("--agent scopes the paid stage too, not just discovery", async () => {
+    // `--agent` is documented as scoping the whole command. Summarizing the
+    // other agent's backlog is a paid model call per trace nobody asked for.
+    let seen: string[] = [];
+    const counting: Summarizer = {
+      async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
+        seen.push(trace.agentId);
+        return facets.map((f) => ({ traceId: trace.id, facet: f.name, summary: `ok ${f.name}` }));
+      },
+    };
+    const { pipeline, store } = makePipeline({ facets: [FACETS[0]!] }, counting);
+    pipeline.ingestJsonl(
+      [
+        ...["a1", "a2"].map((id) => span(id, { attributes: { "gen_ai.agent.name": "alpha" } })),
+        ...["b1"].map((id) => span(id, { attributes: { "gen_ai.agent.name": "beta" } })),
+      ].join("\n"),
+    );
+
+    await pipeline.analyze({ agentId: "beta" });
+    assert.deepEqual(seen, ["beta"]);
+    assert.equal(store.countSummaries("goal"), 1);
+
+    seen = [];
+    await pipeline.analyze({ agentId: "alpha", limit: 1 });
+    assert.deepEqual(seen, ["alpha"], "an explicit --limit must respect --agent as well");
   });
 });
 

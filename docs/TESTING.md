@@ -34,7 +34,8 @@ the loop is not.
 
 - **LLM and embeddings are interfaces.** `Summarizer` and `Embedder` have
   offline implementations in `src/testing/fakes.ts`:
-  - `HashEmbedder` — deterministic bag-of-tokens vectors. Text sharing
+  - `HashEmbedder` (shipped, in `src/embed/index.ts`) — deterministic
+    bag-of-tokens vectors. Text sharing
     vocabulary yields nearby vectors; **paraphrases do not** (measured mean
     cosine 0.111 within a behavior against 0.099 between behaviors, where the
     clusterer needs 0.65 to merge). It exercises the plumbing, not semantic
@@ -45,7 +46,7 @@ the loop is not.
     the default 0.1 gives an intra-cosine of 0.16 and clusters nothing. Existing
     tests use it at 8 dims, where it is fine.
   - `ScriptedSummarizer` / `KeywordSummarizer` — facet summaries without an LLM.
-  - `FakeLabeler` — cluster labels from member summaries.
+  - `StubLabeler` — cluster labels from member summaries, without an LLM.
   - `ParaphraseSummarizer` / `ConceptEmbedder` (`src/testing/paraphrase.ts`) —
     the only fixture that asks whether clustering survives lexical variation.
     The summarizer says the same thing a different way every time; the embedder
@@ -67,15 +68,22 @@ the loop is not.
 ```
 test/
   vectors.test.ts        unit, pure functions
+  config.test.ts         layering, env overrides, validation
   store.test.ts          real SQLite, temp dir
   ingest-otlp.test.ts    fixture-driven
+  receiver.test.ts       OTLP/HTTP over a real loopback socket
   providers.test.ts      stubbed fetch, no network
+  privacy.test.ts        pseudonymization before anything leaves the process
   cluster.test.ts        synthetic vector modes
   registry.test.ts       assignment + lifecycle (the important one)
+  pipeline.test.ts       stage orchestration, paging, cost guards
+  multi-agent.test.ts    per-agent registries and scoping
   delta.test.ts          fixed windows
   report.test.ts         rendering
+  alert.test.ts          the CI gate and webhook de-duplication
   export.test.ts         generated eval artifacts
   cli.test.ts            child_process, real DB, offline providers
+  harness.test.ts        the packaging claims: engines, empty dependencies
   e2e.test.ts            the demo: does sift find a planted failure mode?
   paraphrase.test.ts     does it still find it when every trace is worded differently?
 ```

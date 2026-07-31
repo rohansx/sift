@@ -1,6 +1,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,10 +45,17 @@ before(() => {
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("basics", () => {
-  test("version prints just the version", () => {
-    const r = sift(["--version"]);
-    assert.equal(r.code, 0);
-    assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  test("version prints just the version, as a flag or as a command", () => {
+    // Both forms are documented, and the positional one is a one-token special
+    // case in the dispatcher that nothing else would notice losing.
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as {
+      version: string;
+    };
+    for (const argv of [["--version"], ["version"]]) {
+      const r = sift(argv);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.stdout.trim(), pkg.version, `sift ${argv.join(" ")} disagrees with package.json`);
+    }
   });
 
   test("help documents the commands", () => {
@@ -476,8 +484,22 @@ describe("a corpus that is only partly summarized", () => {
     assert.equal(allowed.code, 0, allowed.stdout);
   });
 
+  test("the gate counts traces, not trace-facet pairs", () => {
+    // The bug: the count was summed inside the per-facet loop, so a four-facet
+    // preset reported four times the number, and `sift check` printed a figure
+    // larger than the number of traces in the database. Deliberately without
+    // --facet, which is what hid it.
+    const db2 = partialDb();
+    const r = sift(["check", "--db", db2, "--json"]);
+    const parsed = JSON.parse(r.stdout) as { uncoveredTraces: number };
+    assert.equal(parsed.uncoveredTraces, 239);
+  });
+
   test("analyze without a limit finishes the corpus it ingested", () => {
-    // The bug: analyze stopped at its internal batch and said nothing.
+    // Not a batch-boundary test — 240 traces fit inside one SUMMARIZE_BATCH.
+    // What it pins is the contract at the CLI seam: no --limit means the gate
+    // has nothing left to complain about afterwards. The batch crossing itself
+    // is pinned in test/pipeline.test.ts, where the fixture is large enough.
     const db2 = partialDb();
     assert.equal(sift(["analyze", "--otlp", tracesPath, "--db", db2]).code, 0);
     const r = sift(["check", "--facet", "behavior", "--db", db2, "--json"]);
@@ -509,6 +531,71 @@ describe("alert", () => {
     const parsed = JSON.parse(r.stdout) as { alerts: unknown[]; dryRun: boolean };
     assert.ok(Array.isArray(parsed.alerts));
     assert.equal(parsed.dryRun, true);
+  });
+});
+
+describe("serve", () => {
+  test("--agent names the agent for spans that carry none, exactly as ingest does", { timeout: 60_000 }, async () => {
+    // The bug: --agent was accepted, documented, and dropped, so the same spans
+    // landed under "myapp" from a file and under "default" over HTTP — and
+    // `sift report --agent myapp` then showed an empty database.
+    const serveDb = join(dir, "serve.db");
+    const child = spawn(process.execPath, [CLI, "serve", "--port", "0", "--settle", "0", "--agent", "myapp"], {
+      env: { ...process.env, SIFT_DB: serveDb, SIFT_LLM_PROVIDER: "fake", SIFT_EMBED_PROVIDER: "hash" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const url = await new Promise<string>((resolve, reject) => {
+        let buf = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          buf += chunk.toString();
+          const found = /http:\/\/[^/\s]+/.exec(buf);
+          if (found) resolve(found[0]);
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => reject(new Error(`serve exited with ${code}`)));
+      });
+
+      const anonymous = JSON.stringify({
+        resourceSpans: [
+          {
+            resource: { attributes: [] },
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+                    spanId: "00f067aa0ba902b7",
+                    name: "chat",
+                    startTimeUnixNano: "1782000000000000000",
+                    endTimeUnixNano: "1782000001000000000",
+                    attributes: [{ key: "gen_ai.prompt", value: { stringValue: "where is my refund" } }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const res = await fetch(`${url}/v1/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: anonymous,
+      });
+      assert.equal(res.status, 200);
+
+      // serve flushes on a 5s interval and does not flush on the way out.
+      const probe = new DatabaseSync(serveDb);
+      let agents: string[] = [];
+      for (let i = 0; i < 40 && agents.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        agents = (probe.prepare("SELECT DISTINCT agent_id a FROM traces").all() as Array<{ a: string }>).map((r) => r.a);
+      }
+      probe.close();
+      assert.deepEqual(agents, ["myapp"]);
+    } finally {
+      child.kill("SIGTERM");
+    }
   });
 });
 

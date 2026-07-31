@@ -10,6 +10,7 @@ import { EXPORT_FORMATS, renderExport, type ExportFormat } from "../export/evals
 import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
 
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
+import type { FlushOptions } from "../ingest/pending.ts";
 import { startReceiver, DEFAULT_PORT } from "../ingest/receiver.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
 import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../alert/check.ts";
@@ -397,9 +398,15 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
     process.stderr.write(`warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces\n`);
   }
 
+  // --agent names the agent for spans that carry no agent attribute, exactly as
+  // it does for `sift ingest`. Without it here, the same spans landed under
+  // "myapp" from a file and under "default" over HTTP.
+  const flushOpts: FlushOptions = { settleMs };
+  if (typeof ctx.values.agent === "string") flushOpts.agentId = ctx.values.agent;
+
   const timer = setInterval(() => {
     try {
-      pipeline.flushPending({ settleMs });
+      pipeline.flushPending(flushOpts);
     } catch (err) {
       // Losing one flush is recoverable — the spans stay staged. Dying is not.
       process.stderr.write(`flush failed, will retry: ${(err as Error).message}\n`);

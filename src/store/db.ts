@@ -83,6 +83,12 @@ export interface ListTracesOptions {
   limit?: number;
 }
 
+/** Position in the (started_at, id) order every trace page is served in. */
+export interface TraceCursor {
+  startedAt: string;
+  id: string;
+}
+
 export interface PendingSpan {
   traceId: string;
   /** dedupe key within the trace: the span id, or a hash when it has none */
@@ -172,9 +178,19 @@ export class SiftStore {
     return Number(this.getMeta("schema_version"));
   }
 
-  /** Runs `fn` inside a transaction, rolling back if it throws. */
+  /**
+   * Runs `fn` inside a transaction, rolling back if it throws.
+   *
+   * IMMEDIATE rather than the default deferred, because every caller here reads
+   * and then writes. A deferred transaction takes its read snapshot first, and
+   * if another connection committed in between, the upgrade to a write fails
+   * with SQLITE_BUSY_SNAPSHOT *instantly* — the busy handler is never consulted,
+   * so the busy_timeout above does not cover it. That is `sift analyze` on a
+   * cron exiting 1 with "database is locked" because `sift serve` happened to be
+   * flushing. Taking the write lock up front is what puts the wait back.
+   */
   transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN");
+    this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = fn();
       this.db.exec("COMMIT");
@@ -248,13 +264,21 @@ export class SiftStore {
    */
   tracesNeedingSummaries(
     facets: string[],
-    opts: { limit?: number; since?: string; agentId?: string } = {},
+    opts: { limit?: number; since?: string; agentId?: string; after?: TraceCursor } = {},
   ): Trace[] {
     if (facets.length === 0) return [];
     const { sql, params } = pendingSummaryFilter(facets, opts);
+    let where = sql;
+    if (opts.after) {
+      // Keyset cursor in the same order the page is served in. Offsets would
+      // not do: a summarized trace leaves the result set, so row N of the next
+      // page is not row N+limit of this one.
+      where += " AND (t.started_at > ? OR (t.started_at = ? AND t.id > ?))";
+      params.push(opts.after.startedAt, opts.after.startedAt, opts.after.id);
+    }
     const paged = `
       SELECT t.* FROM traces t
-      WHERE ${sql}
+      WHERE ${where}
       ORDER BY t.started_at, t.id
       LIMIT ?`;
     return (this.db.prepare(paged).all(...params, Math.floor(opts.limit ?? 500)) as Row[]).map(rowToTrace);
@@ -274,23 +298,34 @@ export class SiftStore {
   }
 
   /**
-   * Traces this agent has for which the facet has no assignment row at all.
+   * Traces this agent has that are missing an assignment row for at least one
+   * of `facets`.
    *
    * Deliberately not "traces with no summary": a residual gets an assignment
    * row with a NULL theme, so "no row at all" is exactly the set that no share,
    * window, delta or gate in this tool can see. It also catches the later
    * stages — summarized but never embedded, embedded but never assigned —
    * which a summary-shaped question would call done.
+   *
+   * Takes the whole facet set rather than one facet so a caller checking four
+   * facets counts traces, not trace-facet pairs: the same traces are uncovered
+   * in each facet, and summing per facet reported four times the number of
+   * traces in the database.
    */
-  countUncoveredTraces(agentId: string, facet: string): number {
+  countUncoveredTraces(agentId: string, facets: string[]): number {
+    if (facets.length === 0) return 0;
+    const placeholders = facets.map(() => "?").join(", ");
     return (
       this.db
         .prepare(
           `SELECT COUNT(*) c FROM traces t
            WHERE t.agent_id = ?
-             AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.trace_id = t.id AND a.facet = ?)`,
+             AND (
+               SELECT COUNT(DISTINCT a.facet) FROM assignments a
+               WHERE a.trace_id = t.id AND a.facet IN (${placeholders})
+             ) < ?`,
         )
-        .get(agentId, facet) as { c: number }
+        .get(agentId, ...facets, facets.length) as { c: number }
     ).c;
   }
 

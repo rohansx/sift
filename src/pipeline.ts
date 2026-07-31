@@ -1,5 +1,5 @@
 import { resolveFacets, type SiftConfig } from "./config.ts";
-import { SiftStore } from "./store/db.ts";
+import { SiftStore, type TraceCursor } from "./store/db.ts";
 import { ingestOtlpJsonlFile, parseOtlpJsonl, type IngestOptions } from "./ingest/otlp.ts";
 import { flushSettledTraces, type FlushOptions, type FlushResult } from "./ingest/pending.ts";
 import { createSummarizer, createLabeler } from "./facets/summarize.ts";
@@ -8,7 +8,7 @@ import { ThemeRegistry, type StateTransition } from "./registry/index.ts";
 import { computeDeltas, type DeltaReport } from "./delta/index.ts";
 import { buildFacetReport, type FacetReport } from "./report/model.ts";
 import { exportTheme, type EvalExport, type ExportOptions } from "./export/evals.ts";
-import { systemClock, type Clock, type Embedder, type FacetDef, type Labeler, type Summarizer, type Theme } from "./types.ts";
+import { systemClock, type Clock, type Embedder, type FacetDef, type Labeler, type Summarizer, type Theme, type Trace } from "./types.ts";
 import { windowForTrace } from "./window.ts";
 import { Pseudonymizer } from "./privacy/redact.ts";
 import { RedactingSummarizer } from "./privacy/gate.ts";
@@ -172,11 +172,25 @@ export class Pipeline {
    * query when nothing is staged, and without it someone who pointed their
    * exporter at sift would run `sift report`, see nothing, and get no error
    * explaining why.
+   *
+   * Drains rather than flushing once: `flushSettledTraces` caps each call, so a
+   * single call means "up to a page", and a corpus that arrived over HTTP is
+   * routinely larger than one. Stopping at the first page left the rest staged
+   * and invisible while every count downstream treated the page as the whole.
    */
   flushPending(opts: FlushOptions = {}): FlushResult {
-    const result = flushSettledTraces(this.store, opts);
-    if (result.traces > 0) this.log(`assembled ${result.traces} received traces from ${result.spans} staged spans`);
-    return result;
+    const total: FlushResult = { traces: 0, spans: 0, duplicates: 0 };
+    for (;;) {
+      const page = flushSettledTraces(this.store, opts);
+      // Spans consumed is the termination signal, not traces: a settled trace
+      // whose id is already known assembles to a duplicate, which is progress.
+      if (page.spans === 0) break;
+      total.traces += page.traces;
+      total.spans += page.spans;
+      total.duplicates += page.duplicates;
+    }
+    if (total.traces > 0) this.log(`assembled ${total.traces} received traces from ${total.spans} staged spans`);
+    return total;
   }
 
   /* ---------- summarize + embed ---------- */
@@ -193,20 +207,9 @@ export class Pipeline {
     if (opts.since) query.since = opts.since;
     if (opts.agentId) query.agentId = opts.agentId;
     const pending = this.store.tracesNeedingSummaries(facetNames, query);
-    const failures: SummarizeSummary["failures"] = [];
-    let summaries = 0;
 
     this.log(`${pending.length} traces to summarize`);
-    for (const trace of pending) {
-      try {
-        const produced = await this.summarizer.summarize(trace, this.facets);
-        this.store.insertSummaries(produced);
-        summaries += produced.length;
-      } catch (err) {
-        failures.push({ traceId: trace.id, error: (err as Error).message });
-      }
-    }
-
+    const { summaries, failures } = await this.summarizePage(pending);
     const embedded = await this.embedPending();
     if (failures.length > 0) this.log(`${failures.length} traces failed to summarize and will be retried next run`);
 
@@ -224,36 +227,71 @@ export class Pipeline {
     return { traces: pending.length, summaries, embedded, failures, remaining };
   }
 
+  /** The paid loop, factored out so a paging run does not have to re-enter summarize(). */
+  private async summarizePage(
+    traces: Trace[],
+  ): Promise<{ summaries: number; failures: SummarizeSummary["failures"] }> {
+    const failures: SummarizeSummary["failures"] = [];
+    let summaries = 0;
+    for (const trace of traces) {
+      try {
+        const produced = await this.summarizer.summarize(trace, this.facets);
+        this.store.insertSummaries(produced);
+        summaries += produced.length;
+      } catch (err) {
+        failures.push({ traceId: trace.id, error: (err as Error).message });
+      }
+    }
+    return { summaries, failures };
+  }
+
   /**
    * Summarize everything pending, a batch at a time. What `analyze` uses when
    * the caller named no `--limit`, because "ingest → issues list" is a promise
    * about the whole corpus.
    *
-   * The loop stops when nothing is left *or when a pass fails to reduce what
-   * is left*. That second condition is load-bearing: a trace whose
-   * summarization throws stays pending by design, so a naive `while (pending)`
-   * would re-fetch the same permanently-failing traces forever against a paid
-   * API. Failures do cost a re-fetch on every later pass, so a corpus whose
-   * failures fill a whole batch degrades to one pass per trace — at which
-   * point the run is broken for other reasons anyway.
+   * Paged with a keyset cursor rather than by re-asking for "the oldest pending
+   * traces". A trace whose summarization throws stays pending by design, so
+   * re-asking hands back every earlier failure again on every later pass, and
+   * pays for it again: a batch-sized block of failures at the head of the corpus
+   * cost 1,000 model calls for each trace behind it that got through. The cursor
+   * makes a run exactly one call per trace, failures included, and terminates
+   * because it only ever moves forward.
    */
   private async summarizeAll(opts: { since?: string; agentId?: string }): Promise<SummarizeSummary> {
-    const total = this.store.countTracesNeedingSummaries(this.facets.map((f) => f.name), opts);
+    // Before the count, not only inside the passes: a corpus that is entirely
+    // staged spans would otherwise count zero and this would do nothing at all.
+    this.flushPending();
+    const facetNames = this.facets.map((f) => f.name);
+    const total = this.store.countTracesNeedingSummaries(facetNames, opts);
     if (total > SUMMARIZE_BATCH) {
       this.log(`${total} traces to summarize — one model call each; cap it with --limit`);
     }
 
-    const acc: SummarizeSummary = { traces: 0, summaries: 0, embedded: 0, failures: [], remaining: total };
-    while (acc.remaining > 0) {
-      const pass = await this.summarize(opts);
-      acc.traces += pass.traces;
+    const acc: SummarizeSummary = { traces: 0, summaries: 0, embedded: 0, failures: [], remaining: 0 };
+    let after: TraceCursor | undefined;
+    for (;;) {
+      const query: { limit: number; since?: string; agentId?: string; after?: TraceCursor } = {
+        limit: SUMMARIZE_BATCH,
+        ...opts,
+      };
+      if (after) query.after = after;
+      const page = this.store.tracesNeedingSummaries(facetNames, query);
+      if (page.length === 0) break;
+
+      this.log(`${page.length} traces to summarize`);
+      const pass = await this.summarizePage(page);
+      acc.traces += page.length;
       acc.summaries += pass.summaries;
-      acc.embedded += pass.embedded;
       acc.failures.push(...pass.failures);
-      const progressed = pass.remaining < acc.remaining;
-      acc.remaining = pass.remaining;
-      if (!progressed) break;
+      acc.embedded += await this.embedPending();
+      const last = page[page.length - 1]!;
+      after = { startedAt: last.startedAt, id: last.id };
     }
+
+    if (acc.failures.length > 0) this.log(`${acc.failures.length} traces failed to summarize and will be retried next run`);
+    acc.remaining = this.store.countTracesNeedingSummaries(facetNames, opts);
+    if (acc.remaining > 0) this.log(`${acc.remaining} traces still pending`);
     return acc;
   }
 
@@ -348,11 +386,6 @@ export class Pipeline {
     discovery: DiscoverySummary[];
     assign: AssignSummary[];
   }> {
-    // Also flushed here, not only inside summarize(): summarizeAll() counts
-    // pending traces before its first pass, so a corpus that is entirely staged
-    // spans would count zero and analyze would do nothing at all.
-    this.flushPending();
-
     const ingestOpts: IngestOptions = {};
     if (opts.agentId) ingestOpts.agentId = opts.agentId;
 
@@ -364,8 +397,12 @@ export class Pipeline {
     // cost; without one, analyze finishes the job. Capping silently at a batch
     // and then printing shares as if they described everything ingested is the
     // one thing this command must not do.
-    const summarizeOpts: { since?: string } = {};
+    // agentId belongs here as much as since does: --agent is documented as
+    // scoping the whole command, and dropping it made `analyze --agent a` pay
+    // for every unsummarized trace agent b had.
+    const summarizeOpts: { since?: string; agentId?: string } = {};
     if (opts.since !== undefined) summarizeOpts.since = opts.since;
+    if (opts.agentId !== undefined) summarizeOpts.agentId = opts.agentId;
     const summarize =
       opts.limit === undefined
         ? await this.summarizeAll(summarizeOpts)

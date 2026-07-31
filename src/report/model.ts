@@ -113,7 +113,7 @@ export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildR
     // The residual pile is traffic the registry could not explain; this is
     // traffic the report never saw. Both belong on the page, and only one of
     // them was here before.
-    uncoveredTraces: store.countUncoveredTraces(opts.agentId, opts.facet),
+    uncoveredTraces: store.countUncoveredTraces(opts.agentId, [opts.facet]),
     rows,
   };
   if (window) report.window = window;

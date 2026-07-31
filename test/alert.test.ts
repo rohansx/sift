@@ -191,6 +191,35 @@ describe("runCheck", () => {
     assert.match(allowed.notes.join(" "), /39 traces are not summarized/);
   });
 
+  test("uncovered traces are counted once, not once per facet", () => {
+    // The bug this pins: the count was summed inside the per-facet loop, so the
+    // default four-facet preset told CI that 640 traces were unsummarized in a
+    // database holding 200. The number a gate refuses to vouch on has to be a
+    // number of traces.
+    const { store, pipeline } = fixture();
+    const second = "goal";
+    pipeline.facets.push({ name: second, instruction: "what the user wanted" });
+
+    addTheme(store, "SIFT-1");
+    addWindow(store, "v1", [["SIFT-1", 10]]);
+    addWindow(store, "v2", [["SIFT-1", 10]]);
+    // the same traces analyzed under the second facet, so both facets have windows
+    for (const window of ["v1", "v2"]) {
+      for (const t of store.listTraces()) {
+        if (t.version === window) {
+          store.insertAssignment({ traceId: t.id, agentId: AGENT, facet: second, themeId: null, similarity: 0.1, window });
+        }
+      }
+    }
+    for (let i = 0; i < 7; i++) {
+      store.insertTrace({ id: `pending-${i}`, agentId: AGENT, version: "v2", startedAt: "2026-07-01T00:00:00.000Z", text: "", meta: {} });
+    }
+
+    const result = runCheck(pipeline, { failOn: DEFAULT_FAIL_ON });
+    assert.equal(result.uncoveredTraces, 7, "counted trace-facet pairs instead of traces");
+    assert.match(renderCheck(result), /7 traces are not summarized yet/);
+  });
+
   test("a facet nobody has analyzed is a note, not a partial corpus", () => {
     // Otherwise `--facet typo` fails the build with a coverage complaint
     // instead of saying there is nothing there.

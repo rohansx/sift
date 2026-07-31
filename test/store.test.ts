@@ -256,8 +256,24 @@ describe("facet summaries", () => {
       store.insertAssignment({ traceId: "residual", agentId: "support-bot", facet: "behavior", themeId: null, similarity: 0.1, window: "v1.2" });
       store.insertAssignment({ traceId: "other-facet", agentId: "support-bot", facet: "goal", themeId: null, similarity: 0.1, window: "v1.2" });
 
-      assert.equal(store.countUncoveredTraces("support-bot", "behavior"), 2);
-      assert.equal(store.countUncoveredTraces("nobody", "behavior"), 0);
+      assert.equal(store.countUncoveredTraces("support-bot", ["behavior"]), 2);
+      assert.equal(store.countUncoveredTraces("nobody", ["behavior"]), 0);
+    });
+  });
+
+  test("over several facets it counts traces, not trace-facet pairs", () => {
+    // The bug this pins: `sift check` added a per-facet count once per facet
+    // and reported four times the traces the database held.
+    withTempStore((store) => {
+      store.insertTraces(["covered", "half", "invisible"].map((id) => trace({ id })));
+      for (const facet of ["goal", "behavior"]) {
+        store.insertAssignment({ traceId: "covered", agentId: "support-bot", facet, themeId: "SIFT-1", similarity: 0.9, window: "v1.2" });
+      }
+      store.insertAssignment({ traceId: "half", agentId: "support-bot", facet: "goal", themeId: null, similarity: 0.1, window: "v1.2" });
+
+      assert.equal(store.countUncoveredTraces("support-bot", ["goal", "behavior"]), 2, "half is uncovered once, not twice");
+      assert.equal(store.countUncoveredTraces("support-bot", ["goal"]), 1);
+      assert.equal(store.countUncoveredTraces("support-bot", []), 0);
     });
   });
 
@@ -518,6 +534,35 @@ describe("transactions", () => {
       });
       assert.equal(n, 1);
       assert.equal(store.countTraces(), 1);
+    });
+  });
+
+  test("takes the write lock at BEGIN, so a read-then-write is not stranded mid-flight", () => {
+    // The bug this pins: a deferred BEGIN fixes a read snapshot, and if another
+    // connection commits before the transaction upgrades to a write, SQLite
+    // answers SQLITE_BUSY_SNAPSHOT *without* consulting busy_timeout. That is
+    // `sift analyze` on a cron exiting 1 while `sift serve` flushes. Probing
+    // with busy_timeout = 0 is how a single-threaded test can tell an IMMEDIATE
+    // transaction from a deferred one: only the former locks out the probe.
+    withTempStore((store, dir) => {
+      const probe = new DatabaseSync(join(dir, "sift.db"));
+      probe.exec("PRAGMA busy_timeout = 0");
+      let probeError = "";
+      store.transaction(() => {
+        store.getTrace("nothing-yet");
+        try {
+          probe
+            .prepare(`INSERT INTO traces (id, agent_id, started_at, text, meta) VALUES (?, ?, ?, ?, ?)`)
+            .run("interloper", "other-bot", "2026-07-01T00:00:00.000Z", "", "{}");
+        } catch (err) {
+          probeError = (err as Error).message;
+        }
+        store.insertTrace(trace({ id: "mine" }));
+      });
+      probe.close();
+
+      assert.match(probeError, /busy|locked/i, "a concurrent writer got in between the read and the write");
+      assert.ok(store.getTrace("mine"), "the transaction's own write must still land");
     });
   });
 });

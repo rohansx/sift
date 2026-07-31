@@ -43,9 +43,10 @@ announcement that it shipped.
 - **Eval export.** `sift export SIFT-n --format mastra-scorer` turns a theme
   into eval cases seeded from the real traces in it.
 - **Storage.** One SQLite file through `node:sqlite`, schema migrations to v3.
-- **CLI.** `help`, `demo`, `ingest`, `summarize`, `analyze`, `bootstrap`,
-  `assign`, `report`, `delta`, `show`, `resolve`, `check`, `alert`, `privacy`,
-  `serve`, `export`, `version`. Every stage is resumable, so an interrupted run
+- **CLI.** `help`, `demo`, `ingest`, `serve`, `summarize`, `analyze`,
+  `bootstrap`, `assign`, `report`, `delta`, `themes`, `show`, `resolve`,
+  `mute`, `reopen`, `relabel`, `check`, `alert`, `privacy`, `export`,
+  `version`. Every stage is resumable, so an interrupted run
   never pays for the same trace twice.
 - **Cost control on the stage that costs money.** `summarize` does 1000 traces
   per pass and prints what is left; `analyze` pages until nothing is pending

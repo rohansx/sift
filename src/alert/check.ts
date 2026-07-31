@@ -56,14 +56,16 @@ export function runCheck(pipeline: Pipeline, opts: CheckOptions): CheckResult {
   let uncoveredTraces = 0;
 
   for (const agentId of agents) {
-    for (const facet of facets) {
-      // Counted only where the facet has been analyzed at all: a facet with no
-      // windows is one nobody uses, already covered by the note below, not a
-      // half-finished run.
-      if (pipeline.store.windowsForFacet(agentId, facet).length > 0) {
-        uncoveredTraces += pipeline.store.countUncoveredTraces(agentId, facet);
-      }
+    // Counted once per agent over every facet being checked, not once per
+    // (agent, facet): it is the same trace set each time round, so adding a
+    // per-facet count per facet reported four times the traces the database
+    // holds. Restricted to facets that have been analyzed at all, because a
+    // facet with no windows is one nobody uses — already covered by the note
+    // below, not a half-finished run.
+    const analyzed = facets.filter((f) => pipeline.store.windowsForFacet(agentId, f).length > 0);
+    uncoveredTraces += pipeline.store.countUncoveredTraces(agentId, analyzed);
 
+    for (const facet of facets) {
       let from = opts.from;
       let to = opts.to;
       if (!from || !to) {

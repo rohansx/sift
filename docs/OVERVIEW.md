@@ -109,7 +109,7 @@ The category's obvious implementation is Python (BERTopic, UMAP, HDBSCAN). sift 
 | Clustering | pure-TS average-linkage agglomerative over cosine | ~50k was the guess; measured ceiling is ~10k per facet per pass (ROADMAP §Measured limits). UMAP+HDBSCAN can be added later behind the same interface |
 | Assignment | nearest centroid, cosine, running-mean updates | the workhorse |
 | Storage | SQLite (node:sqlite, Node ≥22) | single file; sqlite-vec was pencilled in for ANN, and measurement says not yet — assignment is linear and spends its time reloading centroids, not searching them |
-| CLI | commander | |
+| CLI | node:util `parseArgs` | commander was the plan; it would have made the dependency list non-empty for argv splitting |
 | UI (later) | Next.js issues-list | not in v0; markdown reports first |
 
 ## 5. Build plan (7 days)

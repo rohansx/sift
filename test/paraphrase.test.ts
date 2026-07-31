@@ -194,15 +194,20 @@ describe("at the embedding geometry a real model is assumed to have", () => {
     assert.ok(report.residualShare < 0.05, `residual share was ${(report.residualShare * 100).toFixed(1)}%`);
   });
 
-  test("assignThreshold has room either side: a differently-worded relapse still lands", async () => {
+  test("a resolved theme reopens when the behavior comes back, with room either side of assignThreshold", async () => {
     const retry = bestFor(realRun, scoreThemes(realRun), "search-retry-loop")!;
     const registry = realRun.pipeline.registryFor("support-bot");
     registry.resolve(retry.themeId, "fixed by adding backoff");
 
-    // A second seed over the same oracle: the same behavior, worded differently
-    // from how this trace was worded during discovery. (The bank is finite and
-    // 800 traces exhaust it, so the *string* may have occurred elsewhere in the
-    // corpus; the vector is drawn fresh either way.)
+    // Not a paraphrase test, despite the second seed. The phrase bank is finite
+    // and 800 traces exhaust it, so every wording this summarizer can produce is
+    // already in the corpus and embeds to a vector already averaged into the
+    // centroid — ConceptEmbedder seeds from the text, so an identical string is
+    // an identical vector. What is load-bearing here is the lifecycle edge:
+    // assigning to a resolved theme flips it to regressed. The two similarity
+    // assertions below are the oracle's own 0.80/0.45 geometry read back, and
+    // they are here to say where the shipped 0.72 threshold sits between them,
+    // not to claim anything about real embeddings.
     const fresh = new ParaphraseSummarizer({ seed: 9090, concepts: realRun.summarizer.concepts });
     const traceId = [...realRun.records.values()].find((r) => r.scenario === "search-retry-loop")!.traceId;
     const trace = realRun.store.getTrace(traceId)!;
@@ -214,8 +219,9 @@ describe("at the embedding geometry a real model is assumed to have", () => {
     assert.equal(result.themeId, retry.themeId, "the same behavior landed somewhere else");
     assert.deepEqual(result.transition, { themeId: retry.themeId, from: "resolved", to: "regressed" });
     // Measured 0.909 against the right theme, 0.507 against the nearest wrong
-    // one. The shipped 0.72 sits between them with room on both sides; raise it
-    // past ~0.85 or drop it below ~0.55 and this fails.
+    // one — the oracle's stated spread, not evidence about a real embedder. The
+    // shipped 0.72 sits between them with room on both sides; raise it past
+    // ~0.85 or drop it below ~0.55 and this fails.
     assert.ok(result.similarity > 0.85, `similarity to its own theme was only ${result.similarity.toFixed(3)}`);
     const others = realRun.store
       .themesForFacet("support-bot", "behavior")
@@ -268,10 +274,14 @@ describe("two behaviors that read alike", () => {
   });
 
   test("and fuse into one meaningless theme above it", async () => {
-    // The boundary is sharp and sits exactly at 1 - mergeThreshold = 0.65.
-    // Together these two turn the magic 0.35 into a stated contract: two
-    // behaviors separate iff their summaries embed below 0.65 cosine.
-    const clusters = await twoConcepts(0.65);
+    // The boundary sits at 1 - mergeThreshold = 0.65. Tested at 0.70 rather
+    // than on the cut itself: 200 sampled vectors realize a mean cosine that
+    // scatters by ±0.005 around the requested one, so a fixture asked for
+    // exactly 0.65 lands either side depending on the seed, and the coin flip
+    // would read as a clustering regression. Together the two tests still state
+    // the contract — two behaviors separate iff their summaries embed below the
+    // cut — with the sampling noise outside the assertion.
+    const clusters = await twoConcepts(0.7);
     assert.equal(clusters.length, 1);
     assert.equal(clusters[0]!.size, 200);
     assert.equal(clusters[0]!.purity, 0.5);
