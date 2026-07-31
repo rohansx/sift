@@ -142,6 +142,17 @@ screens into `dist/ui` at publish time, and `sift serve` hands those bytes out
 of a Map from `node:http`. On by default, `--no-ui` to disable, no extra port
 and no extra process. Sankey and the Mastra-storage reader stay cut.
 
+**`sift publish` is the same decision applied to hosting.** Deploying sift
+serverless is not possible in the shape people mean it: the write path is a
+process holding a SQLite file open, and Vercel has neither. Converting the UI to
+Next.js would not change that — `output: 'export'` produces what Vite already
+produces, and anything else makes Next a runtime dependency of the CLI. So the
+read side publishes instead: every response the API would have given, collected
+by running the real receiver on an ephemeral port and fetching from it, written
+next to the built assets as one JSON file. Zero drift by construction, and the
+privacy gate runs over exemplars by default because this is the command that
+puts trace text on someone else's URL.
+
 ## After v0
 
 - OTLP/protobuf, if a decoder can be had without a runtime dependency

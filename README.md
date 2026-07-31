@@ -158,6 +158,7 @@ sift resolve SIFT-14 --note "fixed in v1.4"
 sift check --fail-on regression      # exits 1 in CI if something regressed
 sift alert --webhook $SLACK_URL      # notify once per theme per window
 sift privacy --otlp ./traces.jsonl   # preview what the gate strips
+sift publish --out ./site            # the dashboard as a static site
 ```
 
 `sift help` lists everything. Every stage is resumable: `summarize` only touches
@@ -179,6 +180,34 @@ two commands that do it are explicit about how much they will spend:
 [docs/COST.md](docs/COST.md) has the token math behind those numbers, a worked
 table from 1k to 100k traces, and the ollama recipe that runs the whole hosted
 path locally for nothing — which is also how you verify it without a key.
+
+### Publishing the dashboard
+
+`sift serve` needs a process and a SQLite file, which is exactly what serverless
+hosting does not have. The read side has no such requirement, so it publishes
+instead:
+
+```bash
+sift publish --out ./site
+npx vercel deploy --prod ./site      # or Netlify, Pages, S3 — it is just files
+```
+
+The output is static: the built dashboard plus one `sift-data.json` holding
+every response the live API would have given. No server, no database, no
+functions. The same build serves both — the page uses the bundle when it finds
+one and the live API when it does not — and it stays small because embeddings
+are ~99% of `sift.db` and 0% of what a browser renders.
+
+The pseudonymization gate runs over exemplar traces **by default** here, not
+just in front of a hosted model. A published dashboard is the one place trace
+text lands on a URL other people can reach, and exemplars are whole end-user
+conversations. `--no-redact` turns it off, deliberately and in the command you
+typed. Your stored traces are never modified either way.
+
+Two things it is not. It is a **snapshot**, refreshed when you re-run it, not a
+live tail — put it on a cron after `sift analyze`. And a Vercel deployment is
+public by default: pseudonymized conversation text is still conversation text,
+so gate the deployment if the traces are real.
 
 ## Architecture
 
@@ -233,7 +262,9 @@ with the local hash embedder.
 readers. The dashboard is three screens — issues, one theme, the release delta —
 and it is read-only: resolve, mute, reopen and relabel are CLI commands, so
 there is no write path to the browser and no CSRF story to get wrong. It routes
-on the hash, which is also why the server needs no route table for it. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
+on the hash, which is also why the server needs no route table for it.
+`sift publish` writes it out as static files for Vercel or any other static
+host, but that is a snapshot of a moment, not a live view of the database. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
 default `http/protobuf` gets a 415 telling it to switch, not a decoder. Ids
 arrive as sent, so an exporter that base64s them instead of hex-encoding them
 (the spec says hex for JSON) gives you trace ids that will not match your other

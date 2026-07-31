@@ -49,7 +49,58 @@ export function setToken(token: string): void {
 /** A 401 the caller can branch on without matching a message. */
 export class Unauthorized extends Error {}
 
+/**
+ * The published-snapshot bundle, when this page is a static export.
+ *
+ * `sift publish` writes every response the live API would have given into one
+ * file, so a static host — Vercel, S3, a Pages branch — can serve the dashboard
+ * with no server and no database behind it. One build covers both cases: the
+ * bundle is simply what a live `sift serve` does not have.
+ *
+ * The marker check is not paranoia. A static host's SPA fallback answers any
+ * unknown path with index.html and a 200, so "the fetch succeeded" proves
+ * nothing — without it a missing bundle parses as HTML, throws somewhere
+ * further in, and reads as a data bug rather than a missing file.
+ */
+const STATIC_MARKER = "sift-static-export";
+
+interface StaticBundle {
+  __sift: string;
+  generatedAt: string;
+  redacted: boolean;
+  responses: Record<string, unknown>;
+}
+
+let staticBundle: StaticBundle | null = null;
+
+const staticReady: Promise<void> = fetch("sift-data.json")
+  .then((res) => (res.ok ? (res.json() as Promise<unknown>) : null))
+  .then((body) => {
+    const bundle = body as StaticBundle | null;
+    if (bundle && bundle.__sift === STATIC_MARKER) staticBundle = bundle;
+  })
+  .catch(() => {
+    // No bundle means a live server, which is the normal `sift serve` case.
+  });
+
+/** Snapshot provenance, or null when this page is talking to a live server. */
+export function staticSnapshot(): { generatedAt: string; redacted: boolean } | null {
+  return staticBundle === null ? null : { generatedAt: staticBundle.generatedAt, redacted: staticBundle.redacted };
+}
+
 async function getJson<T>(path: string, signal: AbortSignal): Promise<T> {
+  await staticReady;
+  if (staticBundle !== null) {
+    const body = staticBundle.responses[path];
+    // Published bundles are enumerated from the API's own answers, so a miss is
+    // a stale snapshot rather than a bad request — say which, since "404" from
+    // a page that has no server behind it is a confusing thing to read.
+    if (body === undefined) {
+      throw new Error(`${path} is not in this published snapshot (generated ${staticBundle.generatedAt})`);
+    }
+    return body as T;
+  }
+
   const token = sessionStorage.getItem(TOKEN_KEY);
   const res = await fetch(path, {
     signal,

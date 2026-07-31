@@ -10,6 +10,7 @@ import { renderDeltaTerminal, renderIssuesList } from "../report/terminal.ts";
 import { EXPORT_FORMATS, renderExport, type ExportFormat } from "../export/evals.ts";
 import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
 
+import { publishSite } from "../publish/index.ts";
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
 import type { FlushOptions } from "../ingest/pending.ts";
 import { startReceiver, DEFAULT_PORT } from "../ingest/receiver.ts";
@@ -65,6 +66,7 @@ OTHER
   doctor        check config, keys, endpoints and what a run would cost —
                 before spending anything
   export        emit a theme as eval cases and a scorer prompt
+  publish       write the dashboard out as a static site (Vercel, S3, Pages)
   privacy       preview what the pseudonymization gate strips before the LLM
   demo          generate synthetic traces with planted failure modes
   help, version
@@ -153,6 +155,7 @@ const OPTIONS = {
   webhook: { type: "string" },
   on: { type: "string" },
   "dry-run": { type: "boolean" },
+  "no-redact": { type: "boolean" },
   traces: { type: "string" },
   seed: { type: "string" },
   port: { type: "string" },
@@ -265,6 +268,8 @@ async function run(command: string, ctx: Ctx): Promise<number> {
       return withPipeline(ctx, (p, c) => cmdLifecycle(command, p, c));
     case "export":
       return withPipeline(ctx, cmdExport);
+    case "publish":
+      return withPipeline(ctx, cmdPublish);
     default:
       process.stderr.write(`unknown command: ${command}\n\nRun \`sift help\` for usage.\n`);
       return 2;
@@ -890,6 +895,47 @@ function cmdExport(pipeline: Pipeline, ctx: Ctx): number {
   } else {
     process.stdout.write(content);
   }
+  return 0;
+}
+
+/**
+ * Publishing is the only command that puts trace text somewhere other people
+ * can reach, so the gate is on unless someone says otherwise in the command
+ * they typed — not in a config file they inherited.
+ */
+async function cmdPublish(pipeline: Pipeline, ctx: Ctx): Promise<number> {
+  const outDir = typeof ctx.values.out === "string" ? ctx.values.out : "./site";
+  const redact = ctx.values["no-redact"] !== true;
+
+  let result;
+  try {
+    result = await publishSite({ pipeline, cfg: ctx.cfg, outDir, redact });
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 1;
+  }
+
+  if (ctx.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return 0;
+  }
+
+  const kb = (result.bytes / 1024).toFixed(1);
+  process.stdout.write(`\n  published ${outDir}\n`);
+  process.stdout.write(
+    `    ${result.assets} assets, ${result.themes} themes, ${result.endpoints} endpoints, ${kb} kB of data\n`,
+  );
+  if (result.redacted) {
+    const total = Object.values(result.replacedByRule).reduce((a, b) => a + b, 0);
+    process.stdout.write(`    privacy gate: ${total} values replaced in exemplar traces\n`);
+    for (const [rule, n] of Object.entries(result.replacedByRule).sort((a, b) => b[1] - a[1])) {
+      process.stdout.write(`      ${String(n).padStart(6)}  ${rule}\n`);
+    }
+  } else {
+    process.stdout.write("    privacy gate: OFF — exemplar traces are published verbatim\n");
+  }
+  process.stdout.write(`\n  a published site is a snapshot; re-run after the next sift analyze\n`);
+  process.stdout.write(`  deploy it:  npx vercel deploy --prod ${outDir}\n\n`);
   return 0;
 }
 
