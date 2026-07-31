@@ -5,6 +5,7 @@ npm test          # full suite
 npm run typecheck # tsc --noEmit
 npm run check     # both — the gate for every commit
 npm run test:watch
+npm run bench     # scale measurement, not a gate: ~8 min, prints a table
 ```
 
 ## The setup

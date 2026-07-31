@@ -155,6 +155,25 @@ describe("scale", () => {
     assert.deepEqual(sizes(viaLeaders), sizes(direct));
   });
 
+  test("onLeaders reports the path taken, and null whenever every point is compared", () => {
+    const rng = mulberry32(1234);
+    const points = [...blob(0, 40, 8, 0.05, rng), ...blob(1, 40, 8, 0.05, rng)];
+    const seen: Array<number | null> = [];
+    const onLeaders = (n: number | null) => seen.push(n);
+
+    discoverClusters(points, { minClusterSize: 10, mergeThreshold: 0.35, maxDirect: 10_000, onLeaders });
+    // near-duplicates collapse, so the pre-pass earns its keep and says so
+    discoverClusters(points, { minClusterSize: 10, mergeThreshold: 0.35, maxDirect: 10, onLeaders });
+    // eight mutually distant points collapse to nothing and blow the leader cap
+    // of 4·maxDirect: the pre-pass is abandoned and the exact path runs anyway
+    const spread = Array.from({ length: 8 }, (_, m) => blob(m, 1, 8, 0.02, rng)[0]!);
+    discoverClusters(spread, { minClusterSize: 2, mergeThreshold: 0.35, maxDirect: 1, onLeaders });
+
+    assert.equal(seen[0], null);
+    assert.ok(typeof seen[1] === "number" && seen[1] < points.length, `expected a collapsed leader count, got ${seen[1]}`);
+    assert.equal(seen[2], null);
+  });
+
   test("clusters stay coherent: members are nearer their own centroid than any other", () => {
     const rng = mulberry32(77);
     const points = [...blob(0, 30, 6, 0.1, rng), ...blob(1, 30, 6, 0.1, rng), ...blob(2, 30, 6, 0.1, rng)];

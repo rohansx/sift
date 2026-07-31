@@ -34,9 +34,21 @@ export interface DiscoveryOptions {
   /**
    * Above this many points, a leader pre-pass collapses near-duplicates before
    * agglomeration. The exact quadratic is fine for a few thousand points and
-   * ruinous for a hundred thousand; residual piles reach both.
+   * ruinous well before a hundred thousand — measured, 10k costs 271s and 950MB
+   * and 50k cannot allocate its 18.6 GiB matrix at all (ROADMAP §Measured
+   * limits).
+   *
+   * Setting this *above* n is currently the faster option on summaries that do
+   * not repeat verbatim: see the pre-pass itself for why.
    */
   maxDirect?: number;
+  /**
+   * Observability hook: how many leaders the pre-pass produced, or `null` when
+   * it was skipped or abandoned and the exact path ran on every point. This is
+   * the single number that decides whether a discovery pass costs O(n) or
+   * O(n²), and without it a slow run is unattributable (src/examples/benchmark.ts).
+   */
+  onLeaders?: (leaders: number | null) => void;
 }
 
 export function discoverClusters(embeddings: number[][], opts: DiscoveryOptions): DiscoveryResult {
@@ -51,9 +63,13 @@ export function discoverClusters(embeddings: number[][], opts: DiscoveryOptions)
   const mergeThreshold = opts.mergeThreshold ?? 0.35;
   const maxDirect = opts.maxDirect ?? 1500;
 
-  const groups = n <= maxDirect
-    ? agglomerate(embeddings, embeddings.map(() => 1), mergeThreshold)
-    : agglomerateViaLeaders(embeddings, mergeThreshold, maxDirect);
+  let groups: number[][];
+  if (n <= maxDirect) {
+    opts.onLeaders?.(null);
+    groups = agglomerate(embeddings, embeddings.map(() => 1), mergeThreshold);
+  } else {
+    groups = agglomerateViaLeaders(embeddings, mergeThreshold, maxDirect, opts.onLeaders);
+  }
 
   const clusters: DiscoveredCluster[] = [];
   const noiseIndices: number[] = [];
@@ -161,8 +177,23 @@ function agglomerate(reps: number[][], weights: number[], mergeThreshold: number
  * Leader pre-pass for large inputs: one scan assigns each point to the first
  * leader within half the merge radius, then the leaders — far fewer objects —
  * are agglomerated properly and their members flattened back out.
+ *
+ * "far fewer objects" is the assumption, and benchmarking says it is usually
+ * false. Real summaries do not repeat, and at 1536 dims two phrasings of one
+ * behavior sit ~0.20 apart while the radius is 0.175 — so 2,000 points yield
+ * 1,998 leaders and the scan buys nothing it did not already pay for. Measured
+ * cost of keeping it: 2× at n=2,000, 1.4× at n=10,000, for identical output
+ * (ROADMAP §Measured limits). It only earns its keep when summaries collide
+ * verbatim, which is what the offline fakes do and what a real model does not.
+ * Left in place because deleting it is a clustering behavior change that wants
+ * its own commit; the trigger is what needs rethinking, not the technique.
  */
-function agglomerateViaLeaders(points: number[][], mergeThreshold: number, maxDirect: number): number[][] {
+function agglomerateViaLeaders(
+  points: number[][],
+  mergeThreshold: number,
+  maxDirect: number,
+  onLeaders?: (leaders: number | null) => void,
+): number[][] {
   const radius = mergeThreshold / 2;
   const leaderVectors: number[][] = [];
   const leaderMembers: number[][] = [];
@@ -183,11 +214,18 @@ function agglomerateViaLeaders(points: number[][], mergeThreshold: number, maxDi
     } else {
       leaderVectors.push(p);
       leaderMembers.push([i]);
-      // Pathological data (everything mutually distant) would otherwise make
-      // every point its own leader and buy nothing; fall back to the exact path.
-      if (leaderVectors.length > maxDirect * 4) return agglomerate(points, points.map(() => 1), mergeThreshold);
+      // Data where nothing lands inside the radius would otherwise make every
+      // point its own leader and buy nothing; fall back to the exact path.
+      // Measured, this is the common case, not the pathological one: 1536-dim
+      // summaries of the same behavior sit ~0.20 apart and the radius is 0.175,
+      // so 5,000 points yield 4,964 leaders (ROADMAP §Measured limits).
+      if (leaderVectors.length > maxDirect * 4) {
+        onLeaders?.(null);
+        return agglomerate(points, points.map(() => 1), mergeThreshold);
+      }
     }
   }
+  onLeaders?.(leaderVectors.length);
 
   // leaders are weighted by how many points they absorbed, so average linkage
   // between them means the same thing it would have on the raw points

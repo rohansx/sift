@@ -106,9 +106,9 @@ The category's obvious implementation is Python (BERTopic, UMAP, HDBSCAN). sift 
 | Ingestion | OTLP GenAI spans (JSONL/HTTP), Mastra storage reader | opentelemetry-js for proto if needed; JSONL needs nothing |
 | Summarization | any OpenAI-compatible or Anthropic endpoint via fetch | zero SDK deps |
 | Embeddings | provider interface: OpenAI / Voyage / fastembed local | |
-| Clustering | pure-TS average-linkage agglomerative over cosine | fine at bootstrap scale (n ≤ ~50k). UMAP+HDBSCAN can be added later behind the same interface |
+| Clustering | pure-TS average-linkage agglomerative over cosine | ~50k was the guess; measured ceiling is ~10k per facet per pass (ROADMAP §Measured limits). UMAP+HDBSCAN can be added later behind the same interface |
 | Assignment | nearest centroid, cosine, running-mean updates | the workhorse |
-| Storage | SQLite (node:sqlite, Node ≥22) | single file; sqlite-vec later for ANN if needed |
+| Storage | SQLite (node:sqlite, Node ≥22) | single file; sqlite-vec was pencilled in for ANN, and measurement says not yet — assignment is linear and spends its time reloading centroids, not searching them |
 | CLI | commander | |
 | UI (later) | Next.js issues-list | not in v0; markdown reports first |
 
@@ -138,5 +138,5 @@ Not a dashboard tour. The story is: *pointed sift at N traces, it surfaced a fai
 - Pseudonymization gate integration (pre-LLM PII rewrite) as the differentiated privacy story
 - Sankey drill-down view across facets
 - Alerting (webhook on regressed/new themes)
-- sqlite-vec ANN when registries get large
+- sqlite-vec ANN when registries get large — measured as not the bottleneck yet, see ROADMAP §Measured limits
 - Hierarchical themes (Clio does this; useful past ~100 themes)

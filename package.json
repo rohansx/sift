@@ -25,7 +25,8 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test",
-    "demo": "node src/cli.ts demo"
+    "demo": "node src/cli.ts demo",
+    "bench": "node src/examples/benchmark.ts"
   },
   "keywords": [
     "opentelemetry",

@@ -212,10 +212,21 @@ readers. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
 default `http/protobuf` gets a 415 telling it to switch, not a decoder. Ids
 arrive as sent, so an exporter that base64s them instead of hex-encoding them
 (the spec says hex for JSON) gives you trace ids that will not match your other
-tooling. Discovery is brute-force cosine, which
-is fine into the tens of thousands of traces and will want `sqlite-vec` past
-that. Redaction covers structured identifiers; names and free-text personal
-detail need NER, not regexes.
+tooling. Discovery clustering is the scale ceiling, and it is now measured
+rather than guessed (`npm run bench`, numbers and method in
+[docs/ROADMAP.md](docs/ROADMAP.md#measured-limits)): one bootstrap pass over
+1536-dim vectors takes 2.0s at 1,000 traces, 98s at 5,000, 271s at 10,000 and
+894s at 20,000, and at 50,000 does not start — average linkage needs every
+pairwise distance, and that matrix is 18.6 GiB. Budget ~10,000 traces per facet
+per discovery pass, with the wall in the low twenty-thousands. This README used
+to say brute-force cosine was "fine into the tens of thousands", which had the
+magnitude roughly right and the verb wrong: tens of thousands is where it stops,
+not where it is still comfortable. `sqlite-vec` is not the fix — an ANN index
+answers "nearest k", and agglomeration needs the whole distance structure.
+Assignment, the path that actually runs every day, is linear and unbothered:
+50,000 traces against 40 themes in 253s, of which 78% is re-reading centroids
+out of SQLite rather than comparing them. Redaction covers structured
+identifiers; names and free-text personal detail need NER, not regexes.
 
 **A caveat about the offline mode:** `SIFT_LLM_PROVIDER=fake` uses rule-based
 summaries, not a model. It is real enough to demo and to test the machinery
@@ -241,6 +252,7 @@ npm install
 npm run check      # typecheck + full test suite
 npm test
 npm run build
+npm run bench      # wall time + peak RSS for discovery and assignment, by size
 ```
 
 Node ≥ 22.18 runs the TypeScript sources directly via type stripping, so there
