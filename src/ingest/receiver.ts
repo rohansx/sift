@@ -4,6 +4,9 @@ import { gunzipSync, inflateSync } from "node:zlib";
 
 import { normalizeSpans, type OtlpSpan } from "./otlp.ts";
 import type { PendingSpan, SiftStore } from "../store/db.ts";
+import type { Pipeline } from "../pipeline.ts";
+import { handleApi } from "../serve/api.ts";
+import { isLoopback, send } from "../serve/http.ts";
 
 /**
  * OTLP/HTTP receiver: sift as a collector target rather than a file reader.
@@ -42,8 +45,24 @@ export interface ReceiverOptions {
   maxBodyBytes?: number;
   /** when set, requests must carry `Authorization: Bearer <token>` */
   token?: string;
+  /**
+   * Hand one over and the read-only dashboard API mounts on /api. Absent, the
+   * server is exactly the collector it has always been, down to the 404 text.
+   */
+  pipeline?: Pipeline;
   log?: (message: string) => void;
 }
+
+/**
+ * Why /api can be off even when a pipeline was handed over.
+ *
+ * `--host 0.0.0.0` on a write-only collector meant "anyone can send me spans".
+ * With a read side it would mean "anyone can read every customer conversation
+ * in the database", which is a different sentence and not one anybody typed.
+ */
+const DASHBOARD_OFF =
+  "the dashboard is off: sift is bound to a non-loopback address with no --token, and it serves raw trace text. " +
+  "Restart with --token <secret> to enable it.";
 
 export interface Receiver {
   port: number;
@@ -55,8 +74,14 @@ export async function startReceiver(opts: ReceiverOptions): Promise<Receiver> {
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const log = opts.log ?? (() => {});
 
+  const host = opts.host ?? "127.0.0.1";
+  const api =
+    opts.pipeline === undefined
+      ? undefined
+      : { pipeline: opts.pipeline, off: !isLoopback(host) && opts.token === undefined };
+
   const server = createServer((req, res) => {
-    handle(req, res, opts.store, maxBodyBytes, opts.token).catch((err: Error) => {
+    handle(req, res, opts.store, maxBodyBytes, opts.token, api).catch((err: Error) => {
       // A bug in sift must never cost the exporter its spans, so this is 503
       // (retryable) rather than 500, and it says so out loud.
       log(`receiver error: ${err.message}`);
@@ -64,7 +89,6 @@ export async function startReceiver(opts: ReceiverOptions): Promise<Receiver> {
     });
   });
 
-  const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? DEFAULT_PORT;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -95,12 +119,27 @@ async function handle(
   store: SiftStore,
   maxBodyBytes: number,
   token: string | undefined,
+  api: { pipeline: Pipeline; off: boolean } | undefined,
 ): Promise<void> {
-  const path = (req.url ?? "/").split("?")[0];
+  const path = (req.url ?? "/").split("?")[0]!;
 
   // Left unauthenticated on purpose: a liveness probe that needs a secret is a
   // liveness probe nobody wires up.
   if (path === "/healthz") return send(res, 200, { status: "ok", pendingSpans: store.countPendingSpans() });
+
+  // The dashboard branch, taken only when `sift serve` handed over a pipeline.
+  // Without one this falls through to the endpoint 404 below, which is what
+  // keeps every response a plain collector already gives byte-identical.
+  if (api && (path === "/api" || path.startsWith("/api/"))) {
+    if (api.off) return send(res, 404, { error: DASHBOARD_OFF });
+    // The same bearer that guards writes guards reads. It has to: the read side
+    // hands back the trace text the write side only accepted.
+    if (token !== undefined && !tokenMatches(bearer(req), token)) {
+      return send(res, 401, { error: "missing or wrong bearer token" }, { "www-authenticate": "Bearer" });
+    }
+    const query = new URL(req.url ?? "/", "http://sift.invalid").searchParams;
+    return handleApi(req, res, api.pipeline, path, query);
+  }
 
   if (path === "/v1/metrics" || path === "/v1/logs") {
     return send(res, 404, {
@@ -226,10 +265,4 @@ function readCappedBody(req: IncomingMessage, maxBytes: number): Promise<Buffer 
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
-}
-
-function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(payload), ...headers });
-  res.end(payload);
 }

@@ -12,6 +12,7 @@ import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
 import type { FlushOptions } from "../ingest/pending.ts";
 import { startReceiver, DEFAULT_PORT } from "../ingest/receiver.ts";
+import { isLoopback } from "../serve/http.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
 import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../alert/check.ts";
 import { pendingAlerts, markAlerted, WebhookAlerter, type Alert, type AlertEvent } from "../alert/webhook.ts";
@@ -33,7 +34,8 @@ USAGE
 
 PIPELINE
   ingest        read OTLP GenAI spans (JSON lines) into the local database
-  serve         receive OTLP/JSON spans over HTTP; be a collector target
+  serve         receive OTLP/JSON spans over HTTP; be a collector target, and
+                serve the read-only issues API on /api (loopback, or --token)
   summarize     facet-summarize and embed traces that do not have summaries yet
   bootstrap     discover themes from everything not yet assigned
   assign        assign new traces to existing themes; re-discover on residual pressure
@@ -377,6 +379,9 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   const opts: Parameters<typeof startReceiver>[0] = {
     store: pipeline.store,
     port: intOption(ctx, "port") ?? DEFAULT_PORT,
+    // The same pipeline the flush timer below uses, so /api reads the database
+    // this process is writing rather than opening a second handle to it.
+    pipeline,
     log: (m) => process.stderr.write(`${m}\n`),
   };
   if (typeof ctx.values.host === "string") opts.host = ctx.values.host;
@@ -385,6 +390,10 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   const token = typeof ctx.values.token === "string" ? ctx.values.token : process.env.SIFT_RECEIVER_TOKEN;
   if (token) opts.token = token;
 
+  // The receiver applies this same rule; it is repeated here only so the banner
+  // never advertises a URL that answers 404, which is worse than saying nothing.
+  const readable = opts.host === undefined || isLoopback(opts.host) || Boolean(token);
+
   const receiver = await startReceiver(opts);
   process.stdout.write(
     `sift is receiving OTLP/JSON traces on ${receiver.url}/v1/traces -> ${ctx.cfg.dbPath}\n\n` +
@@ -392,10 +401,14 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
       `  export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n\n` +
       `the protocol line is not optional: the SDK default is protobuf and sift ships no decoder for it.\n` +
       `spans are staged and assembled ${settleMs / 1000}s after a trace's last span.\n` +
-      `this command only receives — run \`sift analyze\` to summarize and cluster.\n`,
+      `this command only receives — run \`sift analyze\` to summarize and cluster.\n` +
+      (readable ? `\nread-only JSON of what has been analyzed so far: ${receiver.url}/api/themes\n` : ""),
   );
   if (opts.host !== undefined && !isLoopback(opts.host) && !token) {
-    process.stderr.write(`warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces\n`);
+    process.stderr.write(
+      `warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces.\n` +
+        `the /api read endpoints stay off in this configuration — they serve raw trace text. Pass --token to enable them.\n`,
+    );
   }
 
   // --agent names the agent for spans that carry no agent attribute, exactly as
@@ -425,10 +438,6 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   });
   process.stdout.write(`\nstopped. ${pipeline.store.countPendingSpans()} spans still staged.\n`);
   return 0;
-}
-
-function isLoopback(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
 async function cmdSummarize(pipeline: Pipeline, ctx: Ctx): Promise<number> {

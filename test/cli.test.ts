@@ -545,16 +545,21 @@ describe("serve", () => {
       stdio: ["ignore", "pipe", "pipe"],
     });
     try {
+      let banner = "";
       const url = await new Promise<string>((resolve, reject) => {
-        let buf = "";
         child.stdout.on("data", (chunk: Buffer) => {
-          buf += chunk.toString();
-          const found = /http:\/\/[^/\s]+/.exec(buf);
+          banner += chunk.toString();
+          const found = /http:\/\/[^/\s]+/.exec(banner);
           if (found) resolve(found[0]);
         });
         child.once("error", reject);
         child.once("exit", (code) => reject(new Error(`serve exited with ${code}`)));
       });
+
+      // On loopback the read side is on, so the banner says where. It must not
+      // print that line when the bind turns /api off — an advertised URL that
+      // 404s is worse than no line at all.
+      assert.match(banner, /read-only JSON .*\/api\/themes/);
 
       const anonymous = JSON.stringify({
         resourceSpans: [
