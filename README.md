@@ -192,9 +192,11 @@ sift publish --out ./site
 npx vercel deploy --prod ./site      # or Netlify, Pages, S3 — it is just files
 ```
 
-The output is static: the built dashboard plus one `sift-data.json` holding
-every response the live API would have given. No server, no database, no
-functions. The same build serves both — the page uses the bundle when it finds
+The output is static: a landing page at `/`, the dashboard at `/app`, and one
+`sift-data.json` holding every response the live API would have given. No
+server, no database, no functions. The landing page is plain HTML with no
+JavaScript at all — a page that exists to say what sift is should not wait on
+React to say it. The same build serves both — the page uses the bundle when it finds
 one and the live API when it does not — and it stays small because embeddings
 are ~99% of `sift.db` and 0% of what a browser renders.
 

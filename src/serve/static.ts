@@ -74,8 +74,16 @@ export function loadUiAssets(root: string | undefined = defaultUiRoot()): Map<st
     // by design; the 404 below says what to do about it.
     return new Map();
   }
-  const index = assets.get("/index.html");
-  if (index) assets.set("/", index);
+  // Any directory holding an index.html answers at the directory itself, so the
+  // landing page is `/` and the dashboard is `/app` rather than `/app/index.html`.
+  // Generalized rather than special-cased for the two that exist today: a build
+  // that adds a third page should not need a change here to be reachable.
+  for (const [path, asset] of [...assets]) {
+    if (!path.endsWith("/index.html")) continue;
+    assets.set(path.slice(0, -"index.html".length), asset); // /app/ and /
+    const bare = path.slice(0, -"/index.html".length);
+    if (bare !== "") assets.set(bare, asset); // /app
+  }
   return assets;
 }
 

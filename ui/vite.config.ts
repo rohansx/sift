@@ -17,6 +17,16 @@ export default defineConfig({
   },
   build: {
     outDir: "../dist/ui",
+    // Two pages, not one app with a marketing route. The landing page is prose
+    // and needs no JavaScript at all; putting it inside the dashboard bundle
+    // would make the first paint of a public page wait on React to explain what
+    // sift is. Vite emits index.html untouched when nothing imports a module.
+    rollupOptions: {
+      input: {
+        landing: fileURLToPath(new URL("./index.html", import.meta.url)),
+        app: fileURLToPath(new URL("./app/index.html", import.meta.url)),
+      },
+    },
     // Vite refuses to empty an outDir outside its root without this. Omit it and
     // every build leaves the previous run's content-hashed assets behind, which
     // then get published.

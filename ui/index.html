@@ -3,10 +3,206 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>sift</title>
+    <title>sift — Sentry-grade issue tracking for agent behavior</title>
+    <meta
+      name="description"
+      content="Open source trace intelligence over OpenTelemetry GenAI spans. Groups agent traces into stable, trackable themes, diffs them across releases, and fails your build when one regresses."
+    />
+    <!--
+      Deliberately not the React app. This page is prose and one table; rendering
+      it through the dashboard bundle would cost 357 kB of JavaScript to say what
+      the HTML already says, and a landing page that waits on a framework to
+      paint is the wrong first impression for a tool whose pitch is that it has
+      no runtime dependencies.
+    -->
+    <style>
+      :root {
+        --bg: oklch(0.145 0 0);
+        --fg: oklch(0.985 0 0);
+        --muted: oklch(0.708 0 0);
+        --line: oklch(0.269 0 0);
+        --card: oklch(0.205 0 0);
+        --up: oklch(0.72 0.17 25);
+        --down: oklch(0.75 0.16 150);
+        --accent: oklch(0.75 0.14 240);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: oklch(1 0 0);
+          --fg: oklch(0.145 0 0);
+          --muted: oklch(0.45 0 0);
+          --line: oklch(0.92 0 0);
+          --card: oklch(0.98 0 0);
+          --up: oklch(0.55 0.2 25);
+          --down: oklch(0.52 0.15 150);
+          --accent: oklch(0.55 0.16 240);
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 68rem; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+      header {
+        display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
+        border-bottom: 1px solid var(--line); padding-bottom: 0.75rem; margin-bottom: 3.5rem;
+      }
+      .brand { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1rem; font-weight: 500; color: var(--fg); text-decoration: none; }
+      .tag { font-size: 0.75rem; color: var(--muted); }
+      header nav { margin-left: auto; display: flex; gap: 1.25rem; font-size: 0.8125rem; }
+      a { color: var(--accent); }
+      header nav a, footer a { color: var(--muted); text-decoration: none; }
+      header nav a:hover, footer a:hover { color: var(--fg); }
+      h1 { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 1.25rem; max-width: 22ch; }
+      .lede { font-size: 1.125rem; color: var(--muted); max-width: 62ch; margin: 0 0 2rem; }
+      .cta { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 3.5rem; }
+      .btn {
+        display: inline-block; padding: 0.55rem 1.1rem; border-radius: 0.5rem;
+        font-size: 0.9375rem; text-decoration: none; border: 1px solid var(--line);
+        color: var(--fg); background: var(--card);
+      }
+      .btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 500; }
+      .btn:hover { border-color: var(--muted); }
+      pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8125rem; line-height: 1.7; background: var(--card);
+        border: 1px solid var(--line); border-radius: 0.75rem;
+        padding: 1.25rem; overflow-x: auto; margin: 0 0 1rem;
+      }
+      .up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--muted); }
+      h2 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 3.5rem 0 0.5rem; }
+      h2 + p { color: var(--muted); margin: 0 0 1.5rem; max-width: 62ch; }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+      .card { border: 1px solid var(--line); border-radius: 0.75rem; padding: 1.1rem 1.25rem; background: var(--card); }
+      .card h3 { margin: 0 0 0.4rem; font-size: 0.9375rem; }
+      .card p { margin: 0; font-size: 0.875rem; color: var(--muted); }
+      footer { margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1.25rem; display: flex; gap: 1.25rem; flex-wrap: wrap; font-size: 0.8125rem; color: var(--muted); }
+      .note { font-size: 0.8125rem; color: var(--muted); margin-top: -0.5rem; }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div class="wrap">
+      <header>
+        <a class="brand" href="/">sift</a>
+        <span class="tag">trace intelligence for agents</span>
+        <nav>
+          <a href="/app">dashboard</a>
+          <a href="https://github.com/rohansx/sift">github</a>
+        </nav>
+      </header>
+
+      <main>
+        <h1>Sentry-grade issue tracking for agent behavior.</h1>
+        <p class="lede">
+          Your agent produces thousands of traces. Nobody reads them. Your evals only catch failure
+          modes you already knew about — the expensive ones are the failures you didn't anticipate.
+          sift reads the traces for you, groups what it finds into stable, trackable themes, and
+          tells you what changed since your last deploy.
+        </p>
+
+        <div class="cta">
+          <a class="btn primary" href="/app">Open the live dashboard</a>
+          <a class="btn" href="https://github.com/rohansx/sift">Source on GitHub</a>
+        </div>
+
+        <pre><span class="dim">$</span> sift analyze --since 7d
+
+  THEMES (agent: support-bot, 2,340 traces)
+
+  ▸ SIFT-14  tool-retry loop on search_kb        <span class="up">↑ 11.2%</span>  (was 2.1%)  <span class="up">REGRESSED</span>
+  ▸ SIFT-3   user asks for refund, agent deflects   8.4%   (± 0.3%)   active
+  ▸ SIFT-21  context lost after long tool output    4.1%   NEW
+  ▸ SIFT-7   billing questions resolved first-try  31.0%   <span class="down">(↑ 2.2%)</span>  active
+
+  ○ residual pile: 118 traces (5.0%) — discovery will re-run at 8%</pre>
+        <p class="note">The dashboard above is the same data, rendered. It is a published snapshot of synthetic traffic — no real traces.</p>
+
+        <h2>How it works</h2>
+        <p>
+          The technique comes from <a href="https://www.anthropic.com/research/clio">Anthropic's Clio</a>:
+          don't cluster raw traces, they're too long and too noisy to embed. Have a model write one-line
+          summaries along a few fixed dimensions, then cluster <em>those</em>. sift adds the parts that
+          make it a tool rather than a demo.
+        </p>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Classification-first</h3>
+            <p>
+              Clustering runs at bootstrap and on the residual pile only. After that, themes live in a
+              persistent registry and each new trace is <em>assigned</em> by nearest centroid — one
+              embedding, one cosine. Labels stop renaming themselves weekly, and cost stops growing
+              with your history.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Themes have a lifecycle</h3>
+            <p>
+              A theme gets a stable id and a state machine: new → active → regressed / resolved / muted.
+              Like a Sentry issue, not like a chart. That identity is what makes tracking, alerting and
+              accountability possible at all.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Deltas, not snapshots</h3>
+            <p>
+              The question is never "what are my themes." It's "what changed since Tuesday's deploy."
+              sift diffs theme distributions across releases and scores each change against that
+              theme's own historical variance.
+            </p>
+          </div>
+          <div class="card">
+            <h3>It can block a deploy</h3>
+            <p>
+              <code>sift check --fail-on regression</code> exits non-zero when a theme you'd marked
+              resolved picks traffic back up. Regressions only by default — gating on anything new
+              would turn every release red and teach everyone to ignore the gate.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Closes the loop into evals</h3>
+            <p>
+              <code>sift export</code> turns a failure theme into eval cases seeded from the real
+              traces in that cluster. Discovery → known failure → regression test → resolved. That
+              loop is the product; the clusters are just the intake.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Local-first, gated</h3>
+            <p>
+              One SQLite file, zero runtime dependencies, embeddings can run locally. When summaries do
+              go to a hosted model, a pseudonymization pass rewrites emails, cards, IPs and keys first.
+              Traces are the most PII-dense artifact you produce.
+            </p>
+          </div>
+        </div>
+
+        <h2>Try it without an API key</h2>
+        <p>The offline providers run the whole pipeline — ingest, summarize, embed, discover, delta — with no network and no key.</p>
+        <pre><span class="dim">$</span> npm install -g @siftlabs/sift
+
+<span class="dim">$</span> export SIFT_LLM_PROVIDER=fake SIFT_EMBED_PROVIDER=hash
+<span class="dim">$</span> sift demo --out ./traces.jsonl   <span class="dim"># synthetic traffic, planted failures</span>
+<span class="dim">$</span> sift analyze --otlp ./traces.jsonl
+<span class="dim">$</span> sift serve                       <span class="dim"># the dashboard, on localhost</span></pre>
+        <p class="note">
+          Requires Node 22.18+. The package name is a placeholder scope until the first publish — build from
+          source in the meantime.
+        </p>
+      </main>
+
+      <footer>
+        <span>Apache-2.0</span>
+        <a href="https://github.com/rohansx/sift">GitHub</a>
+        <a href="/app">Dashboard</a>
+        <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OTel GenAI semconv</a>
+        <a href="https://arxiv.org/abs/2412.13678">Clio paper</a>
+      </footer>
+    </div>
   </body>
 </html>

@@ -1,6 +1,6 @@
 import { test, describe, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -85,11 +85,18 @@ function world(t: TestContext, traceText = ""): World {
   return { store, cfg, pipeline };
 }
 
-/** A stand-in for `npm run build:ui`: `npm run check` does not build. */
+/**
+ * A stand-in for `npm run build:ui`: `npm run check` does not build.
+ *
+ * Two pages, because that is what the real build emits — the landing page at
+ * the root and the dashboard under app/.
+ */
 function fixtureUi(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), "sift-pub-ui-"));
   mkdirSync(join(dir, "assets"));
-  writeFileSync(join(dir, "index.html"), '<!doctype html><div id="root"></div>');
+  mkdirSync(join(dir, "app"));
+  writeFileSync(join(dir, "index.html"), "<!doctype html><h1>sift</h1>");
+  writeFileSync(join(dir, "app", "index.html"), '<!doctype html><div id="root"></div>');
   writeFileSync(join(dir, "assets", "index-abc123.js"), 'console.log("sift")');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
@@ -170,6 +177,12 @@ describe("sift publish", () => {
 
     assert.ok(existsSync(join(out, "index.html")));
     assert.ok(existsSync(join(out, "assets", "index-abc123.js")));
+    // The dashboard is a second page under app/. loadUiAssets also keys every
+    // index.html at its directory so `sift serve` can answer /app — writing
+    // those aliases out would create a file named `app` beside the directory,
+    // and on a case-insensitive filesystem one would silently clobber the other.
+    assert.ok(existsSync(join(out, "app", "index.html")), "the dashboard page is missing");
+    assert.equal(statSync(join(out, "app")).isDirectory(), true, "app was written as a file, not a directory");
     const vercel = JSON.parse(readFileSync(join(out, "vercel.json"), "utf8"));
     // No SPA rewrite on purpose: the dashboard routes on the hash, so nothing
     // below `/` ever reaches the host. A catch-all would turn every mistyped

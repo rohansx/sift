@@ -73,7 +73,10 @@ interface StaticBundle {
 
 let staticBundle: StaticBundle | null = null;
 
-const staticReady: Promise<void> = fetch("sift-data.json")
+// Absolute, not relative. The dashboard is served at /app/, where a relative
+// "sift-data.json" resolves to /app/sift-data.json and quietly misses the file
+// that publish actually wrote at the root.
+const staticReady: Promise<void> = fetch("/sift-data.json")
   .then((res) => (res.ok ? (res.json() as Promise<unknown>) : null))
   .then((body) => {
     const bundle = body as StaticBundle | null;

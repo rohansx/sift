@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 
 import { startReceiver } from "../ingest/receiver.ts";
 import { loadUiAssets, UI_NOT_BUILT } from "../serve/static.ts";
@@ -175,8 +175,11 @@ export async function publishSite(opts: PublishOptions): Promise<PublishResult> 
   mkdirSync(opts.outDir, { recursive: true });
 
   for (const [path, asset] of assets) {
-    // loadUiAssets keys "/" at index.html too; writing it would make a directory.
-    if (path === "/") continue;
+    // loadUiAssets also keys every index.html at its directory ("/", "/app",
+    // "/app/") so the server can answer those. Writing them here would create a
+    // file named `app` next to the `app/` directory the real assets need.
+    // Extension-bearing keys are exactly the ones that came off disk.
+    if (extname(path) === "") continue;
     const file = join(opts.outDir, path.replace(/^\//, ""));
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, asset.body);
@@ -186,11 +189,13 @@ export async function publishSite(opts: PublishOptions): Promise<PublishResult> 
   writeFileSync(join(opts.outDir, DATA_FILE), json);
   writeFileSync(join(opts.outDir, "vercel.json"), `${JSON.stringify(VERCEL_CONFIG, null, 2)}\n`);
 
-  log(`${assets.size - 1} assets, ${Object.keys(responses).length} endpoints, ${themes} themes`);
+  // Files written, not map entries: the map also holds directory aliases.
+  const written = [...assets.keys()].filter((p) => extname(p) !== "").length;
+  log(`${written} assets, ${Object.keys(responses).length} endpoints, ${themes} themes`);
 
   return {
     outDir: opts.outDir,
-    assets: assets.size - 1,
+    assets: written,
     endpoints: Object.keys(responses).length,
     themes,
     redacted: redact,
