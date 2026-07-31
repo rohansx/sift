@@ -30,12 +30,16 @@
   "keywords": [
     "opentelemetry",
     "otel",
+    "observability",
+    "llm-observability",
+    "agent-observability",
+    "ai-agents",
+    "llmops",
     "genai",
     "llm",
-    "agents",
-    "observability",
-    "clustering",
     "evals",
+    "tracing",
+    "clustering",
     "trace-analysis"
   ],
   "engines": {
