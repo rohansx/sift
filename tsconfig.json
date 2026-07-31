@@ -5,6 +5,11 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
+    // Without this, tsc auto-includes every node_modules/@types/* package in the
+    // server program. Adding @types/react for the UI would silently inject the DOM
+    // globals into src/ and test/, where a stray `document` or `Element` would then
+    // typecheck instead of erroring. Pin the server's ambient types to node only.
+    "types": ["node"],
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "declaration": true,

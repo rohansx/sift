@@ -1,0 +1,6 @@
+{
+  "name": "sift-ui",
+  "private": true,
+  "type": "module",
+  "description": "Marker package so `npx shadcn add` detects this directory as a project — without it the CLI drops into new-project scaffolding. Deliberately dependency-free: every UI package lives in the root package.json's devDependencies, which is what keeps the published runtime dependency set empty. Do not npm install here."
+}
