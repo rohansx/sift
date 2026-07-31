@@ -53,7 +53,7 @@ describe("basics", () => {
   test("help documents the commands", () => {
     const r = sift(["help"]);
     assert.equal(r.code, 0);
-    for (const cmd of ["ingest", "analyze", "report", "delta", "export", "resolve", "demo"]) {
+    for (const cmd of ["ingest", "serve", "analyze", "report", "delta", "export", "resolve", "demo"]) {
       assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`), `help should mention ${cmd}`);
     }
   });

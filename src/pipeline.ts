@@ -1,6 +1,7 @@
 import { resolveFacets, type SiftConfig } from "./config.ts";
 import { SiftStore } from "./store/db.ts";
 import { ingestOtlpJsonlFile, parseOtlpJsonl, type IngestOptions } from "./ingest/otlp.ts";
+import { flushSettledTraces, type FlushOptions, type FlushResult } from "./ingest/pending.ts";
 import { createSummarizer, createLabeler } from "./facets/summarize.ts";
 import { createEmbedder } from "./embed/index.ts";
 import { ThemeRegistry, type StateTransition } from "./registry/index.ts";
@@ -164,6 +165,20 @@ export class Pipeline {
     };
   }
 
+  /**
+   * Assemble whatever `sift serve` has staged and gone quiet on.
+   *
+   * Called at the top of `summarize`, and so of `analyze` too. It is one cheap
+   * query when nothing is staged, and without it someone who pointed their
+   * exporter at sift would run `sift report`, see nothing, and get no error
+   * explaining why.
+   */
+  flushPending(opts: FlushOptions = {}): FlushResult {
+    const result = flushSettledTraces(this.store, opts);
+    if (result.traces > 0) this.log(`assembled ${result.traces} received traces from ${result.spans} staged spans`);
+    return result;
+  }
+
   /* ---------- summarize + embed ---------- */
 
   /**
@@ -172,6 +187,7 @@ export class Pipeline {
    * so the next run picks it up instead of skipping it forever.
    */
   async summarize(opts: { limit?: number; since?: string; agentId?: string } = {}): Promise<SummarizeSummary> {
+    this.flushPending();
     const facetNames = this.facets.map((f) => f.name);
     const query: { limit: number; since?: string; agentId?: string } = { limit: opts.limit ?? SUMMARIZE_BATCH };
     if (opts.since) query.since = opts.since;
@@ -332,6 +348,11 @@ export class Pipeline {
     discovery: DiscoverySummary[];
     assign: AssignSummary[];
   }> {
+    // Also flushed here, not only inside summarize(): summarizeAll() counts
+    // pending traces before its first pass, so a corpus that is entirely staged
+    // spans would count zero and analyze would do nothing at all.
+    this.flushPending();
+
     const ingestOpts: IngestOptions = {};
     if (opts.agentId) ingestOpts.agentId = opts.agentId;
 

@@ -23,10 +23,26 @@ export {
   type LoadConfigOptions,
 } from "./config.ts";
 
-export { SiftStore, SCHEMA_VERSION, type ListTracesOptions, type WindowCounts } from "./store/db.ts";
+export { SiftStore, SCHEMA_VERSION, type ListTracesOptions, type PendingSpan, type WindowCounts } from "./store/db.ts";
 export { windowForTrace, dayWindow } from "./window.ts";
 
-export { ingestOtlpJsonlFile, parseOtlpJsonl, type IngestOptions, type IngestResult } from "./ingest/otlp.ts";
+export {
+  ingestOtlpJsonlFile,
+  parseOtlpJsonl,
+  normalizeSpans,
+  assembleTrace,
+  type IngestOptions,
+  type IngestResult,
+  type OtlpSpan,
+} from "./ingest/otlp.ts";
+export { flushSettledTraces, DEFAULT_SETTLE_MS, type FlushOptions, type FlushResult } from "./ingest/pending.ts";
+export {
+  startReceiver,
+  DEFAULT_PORT,
+  DEFAULT_MAX_BODY_BYTES,
+  type Receiver,
+  type ReceiverOptions,
+} from "./ingest/receiver.ts";
 
 export {
   AnthropicSummarizer,

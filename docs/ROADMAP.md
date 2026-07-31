@@ -26,6 +26,7 @@ fakes (see [TESTING.md](./TESTING.md)).
 | P13 | `src/privacy/` | Pseudonymization gate in front of the summarizer | ✅ |
 | P14 | across | Per-agent registry scoping, `--since` time filtering | ✅ |
 | P15 | `src/alert/` | `sift check` CI gate and webhook alerting | ✅ |
+| P16 | `src/ingest/receiver.ts` | OTLP/HTTP receiver — `sift serve` as a collector target | ✅ |
 
 ## Phase notes
 
@@ -33,6 +34,15 @@ fakes (see [TESTING.md](./TESTING.md)).
 Clio reimplementation has. The registry is what makes a theme an *issue*:
 `SIFT-14` means the same thing next week as it does today, which is the
 precondition for deltas, alerting, and eval export.
+
+**P16 is JSON-only on purpose.** A protobuf decoder is several hundred lines of
+hot-path parsing to maintain forever against a spec that moves, and it would be
+the first thing in sift arguing for a runtime dependency. The cost is pushed to
+the user as one env var (`OTEL_EXPORTER_OTLP_PROTOCOL=http/json`) and a 415 that
+names it, since the SDK default is protobuf and nearly every first run hits that
+path. The harder problem was not the encoding: a receiver sees BatchSpanProcessor
+flushes, so one trace arrives across several POSTs, which is why spans are staged
+and only assembled once the trace has gone quiet.
 
 **Order matters for one reason:** the registry needs a store, vectors, and a
 clustering primitive underneath it, and the delta engine needs the registry to
@@ -46,6 +56,6 @@ reader. JSONL OTLP ingestion is enough to demo the whole loop.
 
 ## After v0
 
-- OTLP/HTTP receiver so sift can be an OTel collector target
+- OTLP/protobuf, if a decoder can be had without a runtime dependency
 - `sqlite-vec` ANN once registries outgrow brute-force cosine
 - Hierarchical themes (needed past ~100 themes)

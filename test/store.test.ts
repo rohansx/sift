@@ -1,8 +1,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
-import { SCHEMA_VERSION, SiftStore } from "../src/store/db.ts";
+import { SCHEMA_VERSION, SiftStore, type PendingSpan } from "../src/store/db.ts";
 import { withTempDir, withTempStore } from "../src/testing/temp.ts";
 import type { Theme, Trace } from "../src/types.ts";
 
@@ -50,6 +51,31 @@ describe("schema", () => {
       assert.equal(b.schemaVersion(), SCHEMA_VERSION);
       assert.equal(b.countTraces(), 1);
       b.close();
+    });
+  });
+
+  /**
+   * v3 added `pending_spans` and nothing else, so it has no migration function —
+   * the CREATE TABLE IF NOT EXISTS covers it. This is the test that says so.
+   */
+  test("a v2 database opens and gains the staging table", () => {
+    withTempDir((dir) => {
+      const path = join(dir, "s.db");
+      const v3 = new SiftStore(path);
+      v3.insertTrace(trace());
+      v3.close();
+
+      // wind it back to exactly what sift 2 left behind
+      const raw = new DatabaseSync(path);
+      raw.exec("DROP TABLE pending_spans");
+      raw.exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '2')");
+      raw.close();
+
+      const reopened = new SiftStore(path);
+      assert.equal(reopened.schemaVersion(), 3);
+      assert.equal(reopened.countTraces(), 1);
+      assert.equal(reopened.countPendingSpans(), 0);
+      reopened.close();
     });
   });
 
@@ -127,6 +153,41 @@ describe("traces", () => {
     withTempStore((store) => {
       store.insertTraces([trace({ id: "a", agentId: "x" }), trace({ id: "b", agentId: "y" }), trace({ id: "c", agentId: "x" })]);
       assert.deepEqual(store.agentIds(), ["x", "y"]);
+    });
+  });
+});
+
+describe("staged spans", () => {
+  const staged = (over: Partial<PendingSpan> = {}): PendingSpan => ({
+    traceId: "tr-1",
+    spanKey: "span-1",
+    receivedAt: "2026-07-01T10:00:00.000Z",
+    span: JSON.stringify({ traceId: "tr-1", spanId: "span-1", startMs: 0, attributes: {}, events: [] }),
+    ...over,
+  });
+
+  test("staging the same span twice stores it once", () => {
+    withTempStore((store) => {
+      assert.equal(store.stagePendingSpans([staged(), staged({ spanKey: "span-2" })]), 2);
+      // what an exporter retry after a timeout looks like
+      assert.equal(store.stagePendingSpans([staged(), staged({ spanKey: "span-2" })]), 0);
+      assert.equal(store.countPendingSpans(), 2);
+      assert.equal(store.pendingSpansFor("tr-1").length, 2);
+    });
+  });
+
+  test("a trace settles only once its newest span is older than the cutoff", () => {
+    withTempStore((store) => {
+      store.stagePendingSpans([
+        staged({ receivedAt: "2026-07-01T10:00:00.000Z" }),
+        staged({ spanKey: "span-2", receivedAt: "2026-07-01T10:00:30.000Z" }),
+        staged({ traceId: "tr-2", receivedAt: "2026-07-01T09:00:00.000Z" }),
+      ]);
+      assert.deepEqual(store.settledTraceIds("2026-07-01T10:00:10.000Z"), ["tr-2"], "tr-1 is still receiving spans");
+      assert.deepEqual(store.settledTraceIds("2026-07-01T10:01:00.000Z"), ["tr-1", "tr-2"]);
+
+      store.deletePendingSpans("tr-1");
+      assert.equal(store.countPendingSpans(), 1);
     });
   });
 });

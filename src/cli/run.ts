@@ -10,6 +10,7 @@ import { EXPORT_FORMATS, renderExport, type ExportFormat } from "../export/evals
 import { generateDemoTraces } from "../examples/generate-demo-traces.ts";
 
 import { parseOtlpJsonl } from "../ingest/otlp.ts";
+import { startReceiver, DEFAULT_PORT } from "../ingest/receiver.ts";
 import { REDACTION_RULES } from "../privacy/redact.ts";
 import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../alert/check.ts";
 import { pendingAlerts, markAlerted, WebhookAlerter, type Alert, type AlertEvent } from "../alert/webhook.ts";
@@ -31,6 +32,7 @@ USAGE
 
 PIPELINE
   ingest        read OTLP GenAI spans (JSON lines) into the local database
+  serve         receive OTLP/JSON spans over HTTP; be a collector target
   summarize     facet-summarize and embed traces that do not have summaries yet
   bootstrap     discover themes from everything not yet assigned
   assign        assign new traces to existing themes; re-discover on residual pressure
@@ -66,6 +68,15 @@ GLOBAL OPTIONS
                        analyze summarizes everything pending unless you cap it.
   --allow-partial      let check pass over a corpus that is not fully
                        summarized yet (it fails on one by default)
+  --port <n>           serve: listen port (default 4318, the OTLP/HTTP one)
+  --host <addr>        serve: bind address (default 127.0.0.1). Anything else
+                       exposes an unauthenticated write endpoint — pair it
+                       with --token.
+  --token <secret>     serve: require Authorization: Bearer <secret>
+                       (env SIFT_RECEIVER_TOKEN)
+  --settle <seconds>   serve: quiet period after a trace's last span before it
+                       is assembled (default 30)
+  --max-body <bytes>   serve: reject bodies over this (default 4194304)
   --db <path>          sqlite database (default ./sift.db, env SIFT_DB)
   --config <path>      config file (default ./sift.config.json)
   --preset <name>      facet preset: chat | pipeline | coding | support
@@ -73,6 +84,7 @@ GLOBAL OPTIONS
   --no-color           plain output (colour is off by default when piping)
 
 EXAMPLES
+  sift serve                             # then OTEL_EXPORTER_OTLP_PROTOCOL=http/json
   sift demo --out ./demo-traces.jsonl
   sift analyze --otlp ./demo-traces.jsonl
   sift report
@@ -118,6 +130,11 @@ const OPTIONS = {
   "dry-run": { type: "boolean" },
   traces: { type: "string" },
   seed: { type: "string" },
+  port: { type: "string" },
+  host: { type: "string" },
+  token: { type: "string" },
+  settle: { type: "string" },
+  "max-body": { type: "string" },
   strict: { type: "boolean" },
   json: { type: "boolean" },
   color: { type: "boolean" },
@@ -187,6 +204,8 @@ async function run(command: string, ctx: Ctx): Promise<number> {
       return cmdPrivacy(ctx);
     case "ingest":
       return withPipeline(ctx, cmdIngest);
+    case "serve":
+      return withPipeline(ctx, cmdServe);
     case "summarize":
       return withPipeline(ctx, cmdSummarize);
     case "bootstrap":
@@ -345,6 +364,64 @@ function cmdIngest(pipeline: Pipeline, ctx: Ctx): number {
     for (const e of result.errors.slice(0, 5)) process.stdout.write(`  ${e}\n`);
   }
   return 0;
+}
+
+/**
+ * Receive only. The paid work stays in `sift analyze` on a cron: an LLM call in
+ * the ingest path makes both backpressure and the bill unpredictable, and an
+ * exporter cannot wait on a summarizer.
+ */
+async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
+  const settleMs = (intOption(ctx, "settle") ?? 30) * 1000;
+  const opts: Parameters<typeof startReceiver>[0] = {
+    store: pipeline.store,
+    port: intOption(ctx, "port") ?? DEFAULT_PORT,
+    log: (m) => process.stderr.write(`${m}\n`),
+  };
+  if (typeof ctx.values.host === "string") opts.host = ctx.values.host;
+  const maxBody = intOption(ctx, "max-body");
+  if (maxBody !== undefined) opts.maxBodyBytes = maxBody;
+  const token = typeof ctx.values.token === "string" ? ctx.values.token : process.env.SIFT_RECEIVER_TOKEN;
+  if (token) opts.token = token;
+
+  const receiver = await startReceiver(opts);
+  process.stdout.write(
+    `sift is receiving OTLP/JSON traces on ${receiver.url}/v1/traces -> ${ctx.cfg.dbPath}\n\n` +
+      `  export OTEL_EXPORTER_OTLP_ENDPOINT=${receiver.url}\n` +
+      `  export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n\n` +
+      `the protocol line is not optional: the SDK default is protobuf and sift ships no decoder for it.\n` +
+      `spans are staged and assembled ${settleMs / 1000}s after a trace's last span.\n` +
+      `this command only receives — run \`sift analyze\` to summarize and cluster.\n`,
+  );
+  if (opts.host !== undefined && !isLoopback(opts.host) && !token) {
+    process.stderr.write(`warning: bound to ${opts.host} with no --token; anyone who can reach it can write traces\n`);
+  }
+
+  const timer = setInterval(() => {
+    try {
+      pipeline.flushPending({ settleMs });
+    } catch (err) {
+      // Losing one flush is recoverable — the spans stay staged. Dying is not.
+      process.stderr.write(`flush failed, will retry: ${(err as Error).message}\n`);
+    }
+  }, 5000);
+
+  await new Promise<void>((resolve) => {
+    // No final flush: staged spans are durable, and flushing on the way out
+    // would truncate whatever trace was still in flight.
+    const stop = () => {
+      clearInterval(timer);
+      receiver.close().then(resolve, resolve);
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+  process.stdout.write(`\nstopped. ${pipeline.store.countPendingSpans()} spans still staged.\n`);
+  return 0;
+}
+
+function isLoopback(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
 async function cmdSummarize(pipeline: Pipeline, ctx: Ctx): Promise<number> {

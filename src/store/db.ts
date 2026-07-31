@@ -10,7 +10,7 @@ import type { Assignment, FacetSummary, Theme, ThemeState, Trace } from "../type
  * documented upgrade path when a registry outgrows it.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS traces (
@@ -58,8 +58,17 @@ const SCHEMA = `
     PRIMARY KEY (trace_id, facet)
   );
 
+  CREATE TABLE IF NOT EXISTS pending_spans (
+    trace_id TEXT NOT NULL,
+    span_key TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    span TEXT NOT NULL,
+    PRIMARY KEY (trace_id, span_key)
+  );
+
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
+  CREATE INDEX IF NOT EXISTS idx_pending_spans_seen ON pending_spans(trace_id, received_at);
   CREATE INDEX IF NOT EXISTS idx_assignments_theme ON assignments(theme_id, window);
   CREATE INDEX IF NOT EXISTS idx_assignments_scope ON assignments(agent_id, facet, window);
   CREATE INDEX IF NOT EXISTS idx_traces_agent ON traces(agent_id, started_at);
@@ -72,6 +81,15 @@ export interface ListTracesOptions {
   /** ISO timestamp; traces starting at or after it */
   since?: string;
   limit?: number;
+}
+
+export interface PendingSpan {
+  traceId: string;
+  /** dedupe key within the trace: the span id, or a hash when it has none */
+  spanKey: string;
+  receivedAt: string;
+  /** the normalized span, serialized */
+  span: string;
 }
 
 export interface WindowCounts {
@@ -94,6 +112,10 @@ export class SiftStore {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
+    // WAL allows one writer, and a second one otherwise fails instantly with
+    // SQLITE_BUSY — which is `sift analyze` on a cron dying because `sift serve`
+    // happened to be staging a batch. Every command routes through here.
+    this.db.exec("PRAGMA busy_timeout = 5000");
     this.migrate();
   }
 
@@ -111,6 +133,8 @@ export class SiftStore {
       );
     }
     if (version < 2) this.migrateToAgentScoping();
+    // v2 -> v3 added pending_spans and nothing else, so the CREATE TABLE IF NOT
+    // EXISTS above already did it — a migration function would only repeat it.
     if (version < SCHEMA_VERSION) this.setMeta("schema_version", String(SCHEMA_VERSION));
   }
 
@@ -268,6 +292,55 @@ export class SiftStore {
         )
         .get(agentId, facet) as { c: number }
     ).c;
+  }
+
+  /* ---------- staged spans ---------- */
+
+  /**
+   * Park spans until their trace looks finished. Returns how many were new.
+   *
+   * INSERT OR IGNORE on (trace_id, span_key) is what makes an exporter retry
+   * free: a batch redelivered after a timeout must not double the span count of
+   * the trace it belongs to.
+   */
+  stagePendingSpans(rows: PendingSpan[]): number {
+    return this.transaction(() => {
+      const stmt = this.db.prepare(
+        `INSERT OR IGNORE INTO pending_spans (trace_id, span_key, received_at, span) VALUES (?, ?, ?, ?)`,
+      );
+      let n = 0;
+      for (const r of rows) n += Number(stmt.run(r.traceId, r.spanKey, r.receivedAt, r.span).changes);
+      return n;
+    });
+  }
+
+  /** Traces whose most recent span arrived at or before `cutoffIso`. */
+  settledTraceIds(cutoffIso: string, limit = 1000): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT trace_id FROM pending_spans GROUP BY trace_id
+           HAVING MAX(received_at) <= ? ORDER BY trace_id LIMIT ?`,
+        )
+        .all(cutoffIso, Math.floor(limit)) as Array<{ trace_id: string }>
+    ).map((r) => r.trace_id);
+  }
+
+  /** The staged spans of one trace, still serialized. */
+  pendingSpansFor(traceId: string): string[] {
+    return (
+      this.db.prepare(`SELECT span FROM pending_spans WHERE trace_id = ? ORDER BY span_key`).all(traceId) as Array<{
+        span: string;
+      }>
+    ).map((r) => r.span);
+  }
+
+  deletePendingSpans(traceId: string): void {
+    this.db.prepare(`DELETE FROM pending_spans WHERE trace_id = ?`).run(traceId);
+  }
+
+  countPendingSpans(): number {
+    return (this.db.prepare(`SELECT COUNT(*) c FROM pending_spans`).get() as { c: number }).c;
   }
 
   /* ---------- summaries ---------- */

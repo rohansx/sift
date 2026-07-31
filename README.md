@@ -95,6 +95,30 @@ sift analyze --otlp ./traces.jsonl   # ingest → summarize → embed → discov
 sift delta --facet behavior          # what changed between the two releases
 ```
 
+To send traces straight from a running agent instead of exporting a file, sift
+is an OTLP/HTTP collector target:
+
+```bash
+sift serve                                            # 127.0.0.1:4318, receive-only
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json          # not optional — see below
+```
+
+`serve` only receives: spans are staged in SQLite, assembled into a trace 30s
+after that trace's last span (a `BatchSpanProcessor` flushes one conversation
+across several POSTs, and half a trace would summarize into the wrong theme),
+and left for `sift analyze` on a cron to summarize. Keeping paid model calls out
+of the ingest path is what makes both backpressure and the bill predictable.
+
+The protocol line is the one thing you have to change: sift speaks OTLP/**JSON**
+only, and the SDK default is protobuf. A protobuf body gets a 415 that says so
+rather than a silent drop, because a decoder is several hundred lines of
+hot-path parsing against a moving spec and sift ships no runtime dependencies.
+`--token` (or `SIFT_RECEIVER_TOKEN`) adds a bearer check; the bind is loopback
+by default because an unauthenticated trace sink on `0.0.0.0` is an exfil
+surface.
+
 Against your own traces, point the summarizer at a real model:
 
 ```bash
@@ -138,6 +162,7 @@ two commands that do it are explicit about how much they will spend:
 
 ```
  OTLP / Mastra / Langfuse / Phoenix
+   JSONL file, or POST /v1/traces
             │
             ▼
    ┌─────────────────┐
@@ -182,9 +207,12 @@ embedder — one theme per behavior at 100% recall given embeddings of the quali
 a hosted model is assumed to have, and one theme per *phrasing* at 21% recall
 with the local hash embedder.
 
-**Not there yet:** no UI, no Sankey view, no Mastra-storage or Langfuse-API
-readers (JSONL OTLP only), and no OTLP/HTTP receiver — sift reads exported
-spans, it is not yet a collector target. Discovery is brute-force cosine, which
+**Not there yet:** no UI, no Sankey view, and no Mastra-storage or Langfuse-API
+readers. The OTLP/HTTP receiver speaks JSON only — an exporter left on the
+default `http/protobuf` gets a 415 telling it to switch, not a decoder. Ids
+arrive as sent, so an exporter that base64s them instead of hex-encoding them
+(the spec says hex for JSON) gives you trace ids that will not match your other
+tooling. Discovery is brute-force cosine, which
 is fine into the tens of thousands of traces and will want `sqlite-vec` past
 that. Redaction covers structured identifiers; names and free-text personal
 detail need NER, not regexes.

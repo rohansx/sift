@@ -30,7 +30,8 @@ export interface IngestResult {
   errors: string[];
 }
 
-interface Span {
+/** One normalized span. Exported because the receiver stages these verbatim. */
+export interface OtlpSpan {
   traceId: string;
   spanId?: string;
   name?: string;
@@ -55,7 +56,7 @@ export function parseOtlpJsonl(content: string, opts: IngestOptions = {}): Inges
   const errors: string[] = [];
   let skippedLines = 0;
   let spanCount = 0;
-  const byTrace = new Map<string, Span[]>();
+  const byTrace = new Map<string, OtlpSpan[]>();
 
   const lines = content.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -73,9 +74,9 @@ export function parseOtlpJsonl(content: string, opts: IngestOptions = {}): Inges
       continue;
     }
 
-    let spans: Span[];
+    let spans: OtlpSpan[];
     try {
-      spans = extractSpans(parsed);
+      spans = normalizeSpans(parsed).spans;
     } catch (err) {
       const msg = `line ${i + 1}: ${(err as Error).message}`;
       if (opts.strict) throw new Error(msg);
@@ -102,8 +103,7 @@ export function parseOtlpJsonl(content: string, opts: IngestOptions = {}): Inges
 
   const traces: Trace[] = [];
   for (const [traceId, spans] of byTrace) {
-    spans.sort((a, b) => a.startMs - b.startMs || (a.spanId ?? "").localeCompare(b.spanId ?? ""));
-    traces.push(toTrace(traceId, spans, opts.agentId ?? "default"));
+    traces.push(assembleTrace(traceId, spans, opts.agentId ?? "default"));
   }
 
   return { traces, spanCount, skippedLines, errors };
@@ -111,35 +111,47 @@ export function parseOtlpJsonl(content: string, opts: IngestOptions = {}): Inges
 
 /* ---------- shape normalization ---------- */
 
-function extractSpans(raw: unknown): Span[] {
+/**
+ * Every span in one line or one request body, plus how many span objects
+ * carried no trace id.
+ *
+ * The reject count is what the receiver turns into an OTLP `partialSuccess`:
+ * one unusable span in a batch of 512 must not cost the caller the other 511,
+ * and silently dropping it would be a lie in the other direction.
+ */
+export function normalizeSpans(raw: unknown): { spans: OtlpSpan[]; rejected: number } {
   if (typeof raw !== "object" || raw === null) throw new Error("expected an object");
   const obj = raw as Record<string, unknown>;
 
   // shape 3: an ExportTraceServiceRequest envelope
   const resourceSpans = (obj.resourceSpans ?? obj.resource_spans) as unknown;
   if (Array.isArray(resourceSpans)) {
-    const out: Span[] = [];
+    const out: OtlpSpan[] = [];
+    let rejected = 0;
     for (const rs of resourceSpans as Array<Record<string, unknown>>) {
       const resourceAttrs = readAttributes((rs.resource as Record<string, unknown>)?.attributes);
       const scopeSpans = (rs.scopeSpans ?? rs.scope_spans ?? rs.instrumentationLibrarySpans) as unknown;
       for (const ss of (Array.isArray(scopeSpans) ? scopeSpans : []) as Array<Record<string, unknown>>) {
         for (const s of (Array.isArray(ss.spans) ? ss.spans : []) as Array<Record<string, unknown>>) {
           const span = toSpan(s);
-          if (!span) continue;
+          if (!span) {
+            rejected++;
+            continue;
+          }
           // resource attributes are defaults; a span's own attributes win
           span.attributes = { ...resourceAttrs, ...span.attributes };
           out.push(span);
         }
       }
     }
-    return out;
+    return { spans: out, rejected };
   }
 
   const span = toSpan(obj);
-  return span ? [span] : [];
+  return span ? { spans: [span], rejected: 0 } : { spans: [], rejected: 1 };
 }
 
-function toSpan(s: Record<string, unknown>): Span | null {
+function toSpan(s: Record<string, unknown>): OtlpSpan | null {
   const traceId = firstString(s, ["trace_id", "traceId", "traceID"]);
   if (!traceId) return null;
 
@@ -147,7 +159,7 @@ function toSpan(s: Record<string, unknown>): Span | null {
   const startMs = readTime(s, ["start_time", "startTime", "startTimeUnixNano", "start_time_unix_nano", "timestamp"]);
   const endMs = readTime(s, ["end_time", "endTime", "endTimeUnixNano", "end_time_unix_nano"]);
 
-  const span: Span = {
+  const span: OtlpSpan = {
     traceId,
     attributes: readAttributes(s.attributes),
     events: events.map((e) => ({
@@ -161,7 +173,7 @@ function toSpan(s: Record<string, unknown>): Span | null {
   const name = firstString(s, ["name"]);
   if (name) span.name = name;
   if (endMs !== undefined) span.endMs = endMs;
-  if (s.status && typeof s.status === "object") span.status = s.status as Span["status"];
+  if (s.status && typeof s.status === "object") span.status = s.status as OtlpSpan["status"];
   return span;
 }
 
@@ -225,7 +237,17 @@ function readTime(o: Record<string, unknown>, keys: string[]): number | undefine
 const AGENT_KEYS = ["gen_ai.agent.name", "gen_ai.assistant.name", "service.name", "mastra.agent.name"];
 const VERSION_KEYS = ["service.version", "deployment.environment.version", "gen_ai.agent.version", "release.version"];
 
-function toTrace(traceId: string, spans: Span[], agentIdFallback: string): Trace {
+/**
+ * Every span of one trace, flattened into the record the summarizer reads.
+ *
+ * Ordering happens here rather than in the caller so that a file read in one
+ * gulp and a receiver assembling spans that arrived across several POSTs
+ * produce byte-identical text for the same trace.
+ */
+export function assembleTrace(traceId: string, unordered: OtlpSpan[], agentIdFallback: string): Trace {
+  const spans = [...unordered].sort(
+    (a, b) => a.startMs - b.startMs || (a.spanId ?? "").localeCompare(b.spanId ?? ""),
+  );
   const agentId = scanAttr(spans, AGENT_KEYS) ?? agentIdFallback;
   const version = scanAttr(spans, VERSION_KEYS);
 
@@ -258,7 +280,7 @@ function toTrace(traceId: string, spans: Span[], agentIdFallback: string): Trace
   return trace;
 }
 
-function scanAttr(spans: Span[], keys: string[]): string | undefined {
+function scanAttr(spans: OtlpSpan[], keys: string[]): string | undefined {
   for (const key of keys) {
     for (const s of spans) {
       const v = asString(s.attributes[key]);
@@ -268,7 +290,7 @@ function scanAttr(spans: Span[], keys: string[]): string | undefined {
   return undefined;
 }
 
-function isError(s: Span): boolean {
+function isError(s: OtlpSpan): boolean {
   const code = s.status?.code;
   if (typeof code === "string" && code.toUpperCase().includes("ERROR")) return true;
   if (code === 2) return true; // STATUS_CODE_ERROR
@@ -289,7 +311,7 @@ const TOOL_OUTPUT_KEYS = ["gen_ai.tool.output", "gen_ai.tool.result", "gen_ai.to
  * failure modes the behavior and resource facets are asked to notice, and they
  * are invisible in the message text alone.
  */
-function renderSpans(spans: Span[]): string {
+function renderSpans(spans: OtlpSpan[]): string {
   const parts: string[] = [];
   for (const s of spans) {
     const op = asString(s.attributes["gen_ai.operation.name"]) ?? s.name ?? "span";
@@ -361,7 +383,7 @@ function renderMessages(raw: string): string {
   return lines.length > 1 ? `\n${lines.join("\n")}` : lines[0] ?? raw;
 }
 
-function pickAttr(s: Span, keys: string[]): string | undefined {
+function pickAttr(s: OtlpSpan, keys: string[]): string | undefined {
   for (const k of keys) {
     const v = asString(s.attributes[k]);
     if (v) return v;
