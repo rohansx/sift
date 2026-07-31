@@ -197,14 +197,18 @@ export async function publishSite(opts: PublishOptions): Promise<PublishResult> 
 /**
  * Static hosting config, written next to the assets.
  *
- * `cleanUrls`/`trailingSlash` are left alone: the dashboard is a single page and
- * every route below it is client-side, so the only rewrite that matters is the
- * SPA fallback. The headers mirror what `sift serve` already sends, because a
- * published dashboard is the same trace text on a URL other people can reach.
+ * There is deliberately no SPA rewrite. The dashboard routes on the hash
+ * (`#/theme/SIFT-14`), so a client route never reaches the server and there is
+ * no deep link to fall back for — the three paths that exist are `/`,
+ * `/assets/*` and the data file. A catch-all rewrite would only convert every
+ * mistyped URL into index.html with a 200, which is a worse answer than the 404
+ * it really is.
+ *
+ * The headers mirror what `sift serve` sends, because a published dashboard is
+ * the same trace text on a URL other people can reach.
  */
 const VERCEL_CONFIG = {
   $schema: "https://openapi.vercel.sh/vercel.json",
-  rewrites: [{ source: "/((?!assets/|sift-data\\.json).*)", destination: "/index.html" }],
   headers: [
     {
       source: "/(.*)",

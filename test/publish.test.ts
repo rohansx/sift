@@ -171,8 +171,14 @@ describe("sift publish", () => {
     assert.ok(existsSync(join(out, "index.html")));
     assert.ok(existsSync(join(out, "assets", "index-abc123.js")));
     const vercel = JSON.parse(readFileSync(join(out, "vercel.json"), "utf8"));
-    // Without the SPA rewrite a refresh on a client route is a hard 404.
-    assert.ok(vercel.rewrites.some((r: { destination: string }) => r.destination === "/index.html"));
+    // No SPA rewrite on purpose: the dashboard routes on the hash, so nothing
+    // below `/` ever reaches the host. A catch-all would turn every mistyped
+    // URL into index.html with a 200 instead of the 404 it is.
+    assert.equal(vercel.rewrites, undefined);
+    assert.ok(
+      vercel.headers.some((h: { source: string }) => h.source === "/assets/(.*)"),
+      "hashed assets should be immutable-cached",
+    );
   });
 
   describe("the privacy gate", () => {
