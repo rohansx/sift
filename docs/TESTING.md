@@ -33,13 +33,26 @@ the loop is not.
 
 - **LLM and embeddings are interfaces.** `Summarizer` and `Embedder` have
   offline implementations in `src/testing/fakes.ts`:
-  - `HashEmbedder` — deterministic bag-of-tokens vectors. Same text always
-    yields the same vector, similar text yields nearby vectors. Real enough to
-    exercise clustering and assignment end to end.
+  - `HashEmbedder` — deterministic bag-of-tokens vectors. Text sharing
+    vocabulary yields nearby vectors; **paraphrases do not** (measured mean
+    cosine 0.111 within a behavior against 0.099 between behaviors, where the
+    clusterer needs 0.65 to merge). It exercises the plumbing, not semantic
+    grouping.
   - `ModeEmbedder` — places text near one of N planted vectors, for tests that
-    need known cluster structure with controllable overlap.
+    need known cluster structure with controllable overlap. Its `noise` is a raw
+    per-dimension sigma, so its meaning changes with `dimensions`: at 512 dims
+    the default 0.1 gives an intra-cosine of 0.16 and clusters nothing. Existing
+    tests use it at 8 dims, where it is fine.
   - `ScriptedSummarizer` / `KeywordSummarizer` — facet summaries without an LLM.
   - `FakeLabeler` — cluster labels from member summaries.
+  - `ParaphraseSummarizer` / `ConceptEmbedder` (`src/testing/paraphrase.ts`) —
+    the only fixture that asks whether clustering survives lexical variation.
+    The summarizer says the same thing a different way every time; the embedder
+    is an **oracle** that places a summary near its ground-truth concept at a
+    stated geometry (`intraCosine` / `interCosine`). The oracle is not evidence
+    that a real embedder is semantic — it cannot be. It makes the claim
+    conditional and testable: *given* an embedder with this spread, sift
+    recovers one theme per behavior.
 - **Randomness is seeded.** `mulberry32` in `src/testing/random.ts`. A failing
   test reproduces exactly.
 - **Clocks are injected.** Anything that stamps a timestamp takes a `now()` in
@@ -63,7 +76,25 @@ test/
   export.test.ts         generated eval artifacts
   cli.test.ts            child_process, real DB, offline providers
   e2e.test.ts            the demo: does sift find a planted failure mode?
+  paraphrase.test.ts     does it still find it when every trace is worded differently?
 ```
+
+## What the suite does not prove
+
+`REAL_EMBEDDING_GEOMETRY` in `src/testing/paraphrase.ts` (0.80 intra / 0.45
+inter) is an **estimate** for a hosted model over one-line behavior summaries,
+not a measurement. Every number `paraphrase.test.ts` reports at that geometry is
+conditional on it, and nothing offline can check it — that takes a run against a
+real embedder and a real summarizer. Two assumptions are outstanding:
+
+1. that a real summarizer produces one recoverable concept per behavior rather
+   than one string per behavior (which would make the whole harness aimed at a
+   problem that does not exist), and
+2. that real embeddings actually hit that spread.
+
+Until someone measures both and updates the constant, the honest reading is:
+sift's clustering is verified *given* an embedder of stated quality, and the
+offline `hash` embedder is demonstrably not one.
 
 ## What "done" means for a phase
 

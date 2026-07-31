@@ -173,7 +173,14 @@ The end-to-end test is the claim in miniature: it plants a failure mode in
 synthetic traffic, hands sift only the spans, and checks that sift isolates it
 (>95% purity, >90% recall against ground truth it never sees), ranks it at the
 top of the release delta, and reports `resolved → regressed` when the behavior
-comes back.
+comes back. That purity number comes with a caveat, and `test/paraphrase.test.ts`
+exists to state it: the offline rule-based summarizer emits a byte-identical
+line for every instance of the planted failure, so identical strings are being
+grouped, and the number measures the pipeline rather than the clustering. Rerun
+with a summarizer that paraphrases and the result depends entirely on the
+embedder — one theme per behavior at 100% recall given embeddings of the quality
+a hosted model is assumed to have, and one theme per *phrasing* at 21% recall
+with the local hash embedder.
 
 **Not there yet:** no UI, no Sankey view, no Mastra-storage or Langfuse-API
 readers (JSONL OTLP only), and no OTLP/HTTP receiver — sift reads exported
@@ -186,7 +193,14 @@ detail need NER, not regexes.
 summaries, not a model. It is real enough to demo and to test the machinery
 against, but it echoes phrasing rather than abstracting it, so the `goal` facet
 fragments into one theme per question wording. A real summarizer is what makes
-that facet useful.
+that facet useful. The local `hash` embedder has the matching limitation, and it
+is measured: it groups by shared vocabulary, and two ways of saying the same
+thing score no closer than two unrelated sentences (0.111 against 0.099, where
+merging needs 0.65). So under real paraphrased summaries it produces one theme
+per phrasing — 30 themes for five behaviors, 21% recall on the planted failure.
+It fragments rather than mixing, which is the right direction to fail in, and
+none of sift's health metrics notice. Hosted embeddings are the real default for
+a reason.
 
 See [docs/OVERVIEW.md](docs/OVERVIEW.md) for the design, [docs/ROADMAP.md](docs/ROADMAP.md)
 for what was built in what order, and [docs/TESTING.md](docs/TESTING.md) for how

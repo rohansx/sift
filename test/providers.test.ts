@@ -6,6 +6,7 @@ import { HashEmbedder, OpenAICompatEmbedder, createEmbedder } from "../src/embed
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { cosine, norm } from "../src/cluster/vectors.ts";
 import { KeywordSummarizer, ModeEmbedder, ScriptedSummarizer, StubLabeler } from "../src/testing/fakes.ts";
+import { PARAPHRASE_BANKS, PARAPHRASE_CONCEPTS, ParaphraseSummarizer } from "../src/testing/paraphrase.ts";
 import type { FacetDef, Trace } from "../src/types.ts";
 
 const FACETS: FacetDef[] = [
@@ -242,9 +243,10 @@ describe("HashEmbedder", () => {
     assert.ok(Math.abs(norm(v!) - 1) < 1e-9);
   });
 
-  test("similar phrasings land closer than unrelated ones", async () => {
-    // This is what makes it usable as an offline default, not just a stub:
-    // clustering and assignment tests need real geometry, not noise.
+  test("near-duplicate phrasings land closer than unrelated ones", async () => {
+    // The most this shows: text sharing nearly every content word groups. These
+    // two strings differ by "the" and "after"/"following". The next test is the
+    // other half of the picture.
     const [retryA, retryB, thanks] = await e.embed([
       "the agent retried the search_kb tool after a timeout",
       "agent retried search_kb tool following a timeout",
@@ -254,9 +256,59 @@ describe("HashEmbedder", () => {
     assert.ok(cosine(retryA!, retryB!) > 0.5);
   });
 
+  test("a paraphrase with no shared content words is invisible to it", async () => {
+    // The ceiling on the offline default, stated as a number. Over the
+    // paraphrase corpus it scores two ways of describing one behavior at 0.111
+    // and two unrelated behaviors at 0.099 — a 0.012 gap, where the clusterer
+    // needs 0.65 to merge anything. See test/paraphrase.test.ts for what that
+    // costs end to end (one theme per phrasing, 21% recall).
+    const corpus = PARAPHRASE_CONCEPTS.flatMap((concept) =>
+      PARAPHRASE_BANKS[concept]!.map((t) => ({ concept, text: t.replace("{tool}", "search_kb").replace("{n}", "4") })),
+    );
+    const vectors = await new HashEmbedder(512).embed(corpus.map((c) => c.text));
+
+    const pairs = { intra: [0, 0], inter: [0, 0] };
+    for (let i = 0; i < corpus.length; i++) {
+      for (let j = i + 1; j < corpus.length; j++) {
+        const bucket = corpus[i]!.concept === corpus[j]!.concept ? pairs.intra : pairs.inter;
+        bucket[0]! += cosine(vectors[i]!, vectors[j]!);
+        bucket[1]!++;
+      }
+    }
+    const intra = pairs.intra[0]! / pairs.intra[1]!;
+    const inter = pairs.inter[0]! / pairs.inter[1]!;
+    assert.ok(intra < 0.2, `mean intra-concept cosine was ${intra.toFixed(3)} — has HashEmbedder become semantic?`);
+    assert.ok(intra - inter < 0.1, `intra beat inter by ${(intra - inter).toFixed(3)}; the comment above is now stale`);
+  });
+
   test("empty text yields a zero vector rather than NaN", async () => {
     const [v] = await e.embed([""]);
     assert.equal(norm(v!), 0);
+  });
+});
+
+describe("ParaphraseSummarizer", () => {
+  const trace: Trace = {
+    ...TRACE,
+    text: "## chat\ninput: where is the policy doc\n## execute_tool\ntool: search_kb\nERROR: TimeoutError\n## execute_tool\ntool: search_kb\nERROR: TimeoutError",
+  };
+
+  test("varies its wording but never for the same trace", async () => {
+    // Seeded from the trace id, not from call order: a pipeline that summarizes
+    // in a different order must not produce different summaries.
+    const s = new ParaphraseSummarizer({ seed: 3 });
+    const [first] = await s.summarize(trace, FACETS);
+    const [again] = await s.summarize(trace, FACETS);
+    assert.equal(first!.summary, again!.summary);
+    assert.equal(s.conceptOf(first!.summary), "retry-loop");
+
+    const lines = new Set<string>();
+    for (let i = 0; i < 8; i++) {
+      const [line] = await s.summarize({ ...trace, id: `t${i}` }, FACETS);
+      lines.add(line!.summary);
+      assert.equal(s.conceptOf(line!.summary), "retry-loop", "one behavior must stay one concept however it is worded");
+    }
+    assert.ok(lines.size >= 3, `eight traces of one behavior produced ${lines.size} wordings`);
   });
 });
 
