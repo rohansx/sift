@@ -104,7 +104,12 @@ export async function publishSite(opts: PublishOptions): Promise<PublishResult> 
       return body;
     };
 
-    const meta = await get<{ agents: string[]; facets: string[] }>("/api/meta");
+    const meta = await get<{ agents: string[]; facets: string[]; dbPath: string }>("/api/meta");
+    // The live dashboard shows which database it is reading, which is useful
+    // when you have several. A published snapshot has no database behind it —
+    // the value would be whatever path the build machine happened to use, so it
+    // is both meaningless to a reader and a detail of someone's CI to publish.
+    responses["/api/meta"] = { ...meta, dbPath: "" };
     const themeIds = new Set<string>();
 
     for (const agent of meta.agents) {

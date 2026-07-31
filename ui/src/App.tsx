@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { setToken, useApi, type Meta } from "@/api";
+import { setToken, staticSnapshot, useApi, type Meta } from "@/api";
 import { Picker } from "@/components/picker";
 import { Failure, Pending } from "@/components/query-state";
 import { Button } from "@/components/ui/button";
@@ -132,13 +132,29 @@ function Shell({ children, dbPath }: { children: React.ReactNode; dbPath?: strin
           sift
         </a>
         <span className="text-xs text-muted-foreground">read-only. resolve, mute and relabel live in the CLI.</span>
-        {dbPath !== undefined && (
-          <span className="ml-auto font-mono text-xs break-all text-muted-foreground">{dbPath}</span>
-        )}
+        <Provenance dbPath={dbPath} />
       </header>
       {children}
     </div>
   );
+}
+
+/**
+ * What the corner of the header says about where this page's numbers came from.
+ *
+ * A live dashboard names the database, which is the useful thing when you run
+ * more than one. A published snapshot has no database behind it, so it names the
+ * moment instead — the only question a reader of a static page actually has is
+ * how stale it is.
+ */
+function Provenance({ dbPath }: { dbPath?: string }) {
+  const snapshot = staticSnapshot();
+  const text =
+    snapshot !== null
+      ? `snapshot · ${new Date(snapshot.generatedAt).toISOString().slice(0, 16).replace("T", " ")}Z`
+      : dbPath;
+  if (!text) return null;
+  return <span className="ml-auto font-mono text-xs break-all text-muted-foreground">{text}</span>;
 }
 
 function Empty({ dbPath }: { dbPath: string }) {

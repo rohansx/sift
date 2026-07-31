@@ -26,6 +26,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\" && npm run build:ui",
     "build:ui": "tsc -p ui/tsconfig.json --noEmit && vite build --config ui/vite.config.ts",
     "ui:dev": "vite --config ui/vite.config.ts",
+    "build:site": "npm run build && node scripts/build-site.mjs",
     "prepack": "npm run build",
     "check": "npm run typecheck && npm test",
     "demo": "node src/cli.ts demo",

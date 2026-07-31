@@ -16,3 +16,6 @@ sift.config.local.json
 .idea/
 .vscode/
 *.log
+
+# generated demo site (npm run build:site)
+/site/
