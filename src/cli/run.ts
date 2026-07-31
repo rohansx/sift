@@ -61,6 +61,11 @@ GLOBAL OPTIONS
   --since <window>     ISO date or a span like 7d, 24h; picks which traces get
                        summarized (summarize, analyze). Views are scoped by
                        window instead — see --window and --from/--to.
+  --limit <n>          cap the traces summarized, one model call each.
+                       summarize does 1000 per pass and says what it left;
+                       analyze summarizes everything pending unless you cap it.
+  --allow-partial      let check pass over a corpus that is not fully
+                       summarized yet (it fails on one by default)
   --db <path>          sqlite database (default ./sift.db, env SIFT_DB)
   --config <path>      config file (default ./sift.config.json)
   --preset <name>      facet preset: chat | pipeline | coding | support
@@ -107,6 +112,7 @@ const OPTIONS = {
   since: { type: "string" },
   "fail-on": { type: "string" },
   "min-share": { type: "string" },
+  "allow-partial": { type: "boolean" },
   webhook: { type: "string" },
   on: { type: "string" },
   "dry-run": { type: "boolean" },
@@ -354,6 +360,11 @@ async function cmdSummarize(pipeline: Pipeline, ctx: Ctx): Promise<number> {
     return 0;
   }
   process.stdout.write(`summarized ${result.traces} traces into ${result.summaries} facet lines, embedded ${result.embedded}\n`);
+  if (result.remaining > 0) {
+    process.stdout.write(
+      `${result.remaining} traces still need summarizing — run it again, or sift analyze to finish the corpus\n`,
+    );
+  }
   if (result.failures.length > 0) {
     process.stdout.write(`${result.failures.length} traces failed and will be retried on the next run\n`);
     return 1;
@@ -470,6 +481,7 @@ function cmdCheck(pipeline: Pipeline, ctx: Ctx): number {
   if (typeof ctx.values.to === "string") opts.to = ctx.values.to;
   const minShare = floatOption(ctx, "min-share");
   if (minShare !== undefined) opts.minShare = minShare;
+  if (ctx.values["allow-partial"] === true) opts.allowPartial = true;
 
   const result = runCheck(pipeline, opts);
   if (ctx.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

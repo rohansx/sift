@@ -172,6 +172,34 @@ describe("facet summaries", () => {
     });
   });
 
+  test("counts what a paged summarize pass is leaving behind", () => {
+    // The count and the page must answer the same question, or "1000 done,
+    // 200 left" is arithmetic over two different sets.
+    withTempStore((store) => {
+      store.insertTraces(["a", "b", "c"].map((id) => trace({ id })));
+      store.insertSummary({ traceId: "a", facet: "goal", summary: "x" });
+
+      assert.equal(store.countTracesNeedingSummaries(["goal"]), 2);
+      assert.equal(store.tracesNeedingSummaries(["goal"], { limit: 1 }).length, 1);
+      assert.equal(store.countTracesNeedingSummaries(["goal"], { agentId: "someone-else" }), 0);
+      assert.equal(store.countTracesNeedingSummaries([]), 0);
+    });
+  });
+
+  test("counts traces no window can see, residuals excluded", () => {
+    // A residual has an assignment row with a NULL theme: the report counts it
+    // and can say so. A trace with no row at all is the invisible one.
+    withTempStore((store) => {
+      store.insertTraces(["assigned", "residual", "unsummarized", "other-facet"].map((id) => trace({ id })));
+      store.insertAssignment({ traceId: "assigned", agentId: "support-bot", facet: "behavior", themeId: "SIFT-1", similarity: 0.9, window: "v1.2" });
+      store.insertAssignment({ traceId: "residual", agentId: "support-bot", facet: "behavior", themeId: null, similarity: 0.1, window: "v1.2" });
+      store.insertAssignment({ traceId: "other-facet", agentId: "support-bot", facet: "goal", themeId: null, similarity: 0.1, window: "v1.2" });
+
+      assert.equal(store.countUncoveredTraces("support-bot", "behavior"), 2);
+      assert.equal(store.countUncoveredTraces("nobody", "behavior"), 0);
+    });
+  });
+
   test("finds summaries that still need embedding", () => {
     withTempStore((store) => {
       store.insertTrace(trace());

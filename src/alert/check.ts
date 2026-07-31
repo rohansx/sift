@@ -27,6 +27,8 @@ export interface CheckOptions {
   to?: string;
   /** ignore themes below this share of the window; keeps tiny noise out of CI */
   minShare?: number;
+  /** pass on a partly summarized corpus, for teams who sample deliberately */
+  allowPartial?: boolean;
 }
 
 export interface CheckResult {
@@ -35,6 +37,12 @@ export interface CheckResult {
   reports: DeltaReport[];
   /** human-readable explanations for anything that was skipped */
   notes: string[];
+  /**
+   * Traces in no window, across everything checked. Separate from `failures`
+   * on purpose: "the gate could not see the whole build" and "a theme
+   * regressed" are different verdicts and a CI log must not confuse them.
+   */
+  uncoveredTraces: number;
 }
 
 export function runCheck(pipeline: Pipeline, opts: CheckOptions): CheckResult {
@@ -45,9 +53,17 @@ export function runCheck(pipeline: Pipeline, opts: CheckOptions): CheckResult {
   const reports: DeltaReport[] = [];
   const failures: DeltaFinding[] = [];
   const notes: string[] = [];
+  let uncoveredTraces = 0;
 
   for (const agentId of agents) {
     for (const facet of facets) {
+      // Counted only where the facet has been analyzed at all: a facet with no
+      // windows is one nobody uses, already covered by the note below, not a
+      // half-finished run.
+      if (pipeline.store.windowsForFacet(agentId, facet).length > 0) {
+        uncoveredTraces += pipeline.store.countUncoveredTraces(agentId, facet);
+      }
+
       let from = opts.from;
       let to = opts.to;
       if (!from || !to) {
@@ -80,7 +96,17 @@ export function runCheck(pipeline: Pipeline, opts: CheckOptions): CheckResult {
 
   if (reports.length === 0 && notes.length === 0) notes.push("no facets to check");
   failures.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  return { ok: failures.length === 0, failures, reports, notes };
+
+  // A gate that green-lights a slice of the build is worse than one that
+  // fails: it reports "nothing regressed" about traffic it never looked at.
+  // Someone sampling on purpose still needs a way through, hence allowPartial.
+  if (uncoveredTraces > 0 && opts.allowPartial) {
+    notes.push(
+      `${uncoveredTraces.toLocaleString("en-US")} traces are not summarized yet and were not checked (--allow-partial)`,
+    );
+  }
+  const ok = failures.length === 0 && (uncoveredTraces === 0 || opts.allowPartial === true);
+  return { ok, failures, reports, notes, uncoveredTraces };
 }
 
 function formatShare(x: number): string {
@@ -92,7 +118,17 @@ export function renderCheck(result: CheckResult): string {
   const out: string[] = [""];
   if (result.ok) {
     out.push("  ✓ sift check passed — no themes regressed");
-  } else {
+  }
+  // Deliberately not the regression wording. Both exit 1, and a CI log that
+  // says "failed — 0 findings" over a half-analyzed corpus teaches everyone
+  // that the gate is broken.
+  if (!result.ok && result.uncoveredTraces > 0) {
+    out.push(
+      `  ✗ sift check cannot vouch for this build — ${result.uncoveredTraces.toLocaleString("en-US")} traces are not summarized yet`,
+    );
+    out.push("      run sift summarize first, or sift check --allow-partial to gate on the analyzed slice");
+  }
+  if (result.failures.length > 0) {
     out.push(`  ✗ sift check failed — ${result.failures.length} finding${result.failures.length === 1 ? "" : "s"}`);
     out.push("");
     for (const f of result.failures) {

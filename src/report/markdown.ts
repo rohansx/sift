@@ -41,6 +41,12 @@ export function renderThemeMarkdown(reports: FacetReport[]): string {
       `_residual pile: ${report.residualCount} traces (${formatPercent(report.residualShare)}) — discovery re-runs above ${formatPercent(report.rediscoverThreshold)}._`,
       "",
     );
+    if (report.uncoveredTraces > 0) {
+      out.push(
+        `_⚠ ${report.uncoveredTraces.toLocaleString("en-US")} traces are in no window yet — the shares above do not count them. Run \`sift summarize\`._`,
+        "",
+      );
+    }
   }
 
   return out.join("\n");

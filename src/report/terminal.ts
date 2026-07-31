@@ -31,6 +31,9 @@ export function renderIssuesList(report: FacetReport, opts: IssuesListOptions = 
   if (report.rows.length === 0) {
     out.push("");
     out.push(`  no themes yet for facet "${report.facet}".`);
+    // The empty case is where this matters most: "no themes" reads as "nothing
+    // found" when the truth is often "nothing has been summarized".
+    if (report.uncoveredTraces > 0) out.push(`  ${uncoveredLine(report)}`);
     out.push(`  ingest traces, then run ${paint("sift bootstrap", "bold")} to discover them.`);
     out.push("");
     return out.join("\n");
@@ -65,8 +68,15 @@ export function renderIssuesList(report: FacetReport, opts: IssuesListOptions = 
   out.push(
     `  ○ residual pile: ${report.residualCount} traces (${formatPercent(report.residualShare)}) — ${willRun}`,
   );
+  // Only when there is something to say. A fully analyzed database renders
+  // exactly what it always did.
+  if (report.uncoveredTraces > 0) out.push(`  ${paint(uncoveredLine(report), "yellow")}`);
   out.push("");
   return out.join("\n");
+}
+
+function uncoveredLine(report: FacetReport): string {
+  return `⚠ ${report.uncoveredTraces.toLocaleString("en-US")} traces are in no window yet — no share here counts them. run: sift summarize`;
 }
 
 const CHANGE_WIDTH = 22;

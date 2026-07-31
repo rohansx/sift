@@ -442,6 +442,50 @@ describe("check: the CI gate", () => {
   });
 });
 
+describe("a corpus that is only partly summarized", () => {
+  const partialDb = () => join(dir, "partial.db");
+
+  test("analyze --limit stops where it was told and the report says so", () => {
+    const db2 = partialDb();
+    assert.equal(sift(["analyze", "--otlp", tracesPath, "--limit", "1", "--db", db2]).code, 0);
+
+    const r = sift(["report", "--facet", "behavior", "--db", db2]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /239 traces are in no window yet/);
+  });
+
+  test("summarize caps a pass and prints what it left", () => {
+    const r = sift(["summarize", "--limit", "1", "--db", partialDb()]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /summarized 1 traces/);
+    assert.match(r.stdout, /238 traces still need summarizing/);
+  });
+
+  test("check refuses to vouch for the build, and --allow-partial is the way through", () => {
+    // Same exit code as a regression, deliberately different words: a CI log
+    // must not read "a theme regressed" when the truth is "I saw a fortieth
+    // of your traffic".
+    const db2 = partialDb();
+    const failed = sift(["check", "--facet", "behavior", "--db", db2]);
+    assert.equal(failed.code, 1, failed.stdout);
+    assert.match(failed.stdout, /cannot vouch/);
+    assert.match(failed.stdout, /traces are not summarized/);
+    assert.doesNotMatch(failed.stdout, /check failed/);
+
+    const allowed = sift(["check", "--facet", "behavior", "--db", db2, "--allow-partial"]);
+    assert.equal(allowed.code, 0, allowed.stdout);
+  });
+
+  test("analyze without a limit finishes the corpus it ingested", () => {
+    // The bug: analyze stopped at its internal batch and said nothing.
+    const db2 = partialDb();
+    assert.equal(sift(["analyze", "--otlp", tracesPath, "--db", db2]).code, 0);
+    const r = sift(["check", "--facet", "behavior", "--db", db2, "--json"]);
+    const parsed = JSON.parse(r.stdout) as { uncoveredTraces: number };
+    assert.equal(parsed.uncoveredTraces, 0);
+  });
+});
+
 describe("alert", () => {
   test("dry-run lists what would be sent without a webhook", () => {
     const r = sift(["alert", "--dry-run", "--facet", "behavior"]);

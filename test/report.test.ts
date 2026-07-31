@@ -44,6 +44,13 @@ function addWindow(s: SiftStore, window: string, rows: Array<[string | null, num
   }
 }
 
+/** Ingested, never summarized: in no window, invisible to every share. */
+function addUncovered(s: SiftStore, count: number): void {
+  for (let i = 0; i < count; i++) {
+    s.insertTrace({ id: `pending-${i}`, agentId: AGENT, version: "v1.3", startedAt: "2026-07-02T00:00:00.000Z", text: "", meta: {} });
+  }
+}
+
 /** The README's example registry: a regression, a steady theme, a new one. */
 function demoStore(): SiftStore {
   const s = store();
@@ -144,6 +151,21 @@ describe("buildFacetReport", () => {
     assert.equal(dead.share, 0);
   });
 
+  test("counts traces that are in no window at all", () => {
+    // Distinct from the residual pile: a residual is traffic the registry
+    // could not explain, this is traffic the report never saw.
+    const s = demoStore();
+    addUncovered(s, 39);
+    const report = buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET });
+    assert.equal(report.uncoveredTraces, 39);
+    assert.equal(report.totalAssignments, 100, "shares must still be over the window, not quietly widened");
+    assert.equal(report.residualCount, 77);
+  });
+
+  test("a fully analyzed facet has nothing uncovered", () => {
+    assert.equal(buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET }).uncoveredTraces, 0);
+  });
+
   test("an empty facet reports zeroes rather than throwing", () => {
     const report = buildFacetReport(store(), DEFAULT_CONFIG, { agentId: AGENT, facet: "nothing" });
     assert.deepEqual(report.rows, []);
@@ -190,6 +212,19 @@ describe("issues list (terminal)", () => {
     const out = render();
     assert.match(out, /residual pile: 77 traces \(77\.0%\)/);
     assert.match(out, /8(\.0)?%/);
+  });
+
+  test("warns when traces are in no window, and points at the command that fixes it", () => {
+    const s = demoStore();
+    addUncovered(s, 39);
+    const out = renderIssuesList(buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET }), {});
+    assert.match(out, /39 traces are in no window/);
+    assert.match(out, /sift summarize/);
+  });
+
+  test("says nothing about coverage when nothing is missing", () => {
+    // A fully analyzed database must render exactly what it always did.
+    assert.doesNotMatch(render(), /in no window/);
   });
 
   test("stays plain text unless colour is asked for", () => {
@@ -243,6 +278,16 @@ describe("markdown", () => {
     const md = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
     assert.match(md, /residual/i);
     assert.match(md, /77/);
+  });
+
+  test("notes traces that are in no window under the table", () => {
+    const s = demoStore();
+    addUncovered(s, 39);
+    const md = renderThemeMarkdown([buildFacetReport(s, DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
+    assert.match(md, /39 traces are in no window/);
+
+    const clean = renderThemeMarkdown([buildFacetReport(demoStore(), DEFAULT_CONFIG, { agentId: AGENT, facet: FACET })]);
+    assert.doesNotMatch(clean, /in no window/);
   });
 
   test("an empty report still produces a valid document", () => {

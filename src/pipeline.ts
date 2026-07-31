@@ -46,7 +46,20 @@ export interface SummarizeSummary {
   summaries: number;
   embedded: number;
   failures: Array<{ traceId: string; error: string }>;
+  /** traces still matching the same scope afterwards; 0 means the job is done */
+  remaining: number;
 }
+
+/**
+ * How many traces one summarize pass will take on.
+ *
+ * This is a cost guard, not a tuning knob: every trace in a pass is one paid
+ * model call, and an accidental `sift summarize` over a year of traffic should
+ * not be a five-figure invoice. `analyze` pages through this repeatedly because
+ * it promises a whole picture; `summarize` stops after one pass and says how
+ * much it left, because it is the deliberately incremental command.
+ */
+export const SUMMARIZE_BATCH = 1000;
 
 export interface DiscoverySummary {
   agentId: string;
@@ -160,7 +173,7 @@ export class Pipeline {
    */
   async summarize(opts: { limit?: number; since?: string; agentId?: string } = {}): Promise<SummarizeSummary> {
     const facetNames = this.facets.map((f) => f.name);
-    const query: { limit: number; since?: string; agentId?: string } = { limit: opts.limit ?? 1000 };
+    const query: { limit: number; since?: string; agentId?: string } = { limit: opts.limit ?? SUMMARIZE_BATCH };
     if (opts.since) query.since = opts.since;
     if (opts.agentId) query.agentId = opts.agentId;
     const pending = this.store.tracesNeedingSummaries(facetNames, query);
@@ -180,7 +193,52 @@ export class Pipeline {
 
     const embedded = await this.embedPending();
     if (failures.length > 0) this.log(`${failures.length} traces failed to summarize and will be retried next run`);
-    return { traces: pending.length, summaries, embedded, failures };
+
+    // What a capped pass left behind, over the same scope it just worked on.
+    // Reported rather than assumed to be nothing: a report built on 1,000 of
+    // 40,000 traces is not wrong by a little, and nobody could tell from the
+    // shares that it was built on a slice at all.
+    const scope: { since?: string; agentId?: string } = {};
+    if (opts.since) scope.since = opts.since;
+    if (opts.agentId) scope.agentId = opts.agentId;
+    const remaining = this.store.countTracesNeedingSummaries(facetNames, scope);
+    // Progress, not advice: this same line is emitted once per batch inside a
+    // paging analyze run, where "run sift summarize again" would be nonsense.
+    if (remaining > 0) this.log(`${remaining} traces still pending`);
+    return { traces: pending.length, summaries, embedded, failures, remaining };
+  }
+
+  /**
+   * Summarize everything pending, a batch at a time. What `analyze` uses when
+   * the caller named no `--limit`, because "ingest → issues list" is a promise
+   * about the whole corpus.
+   *
+   * The loop stops when nothing is left *or when a pass fails to reduce what
+   * is left*. That second condition is load-bearing: a trace whose
+   * summarization throws stays pending by design, so a naive `while (pending)`
+   * would re-fetch the same permanently-failing traces forever against a paid
+   * API. Failures do cost a re-fetch on every later pass, so a corpus whose
+   * failures fill a whole batch degrades to one pass per trace — at which
+   * point the run is broken for other reasons anyway.
+   */
+  private async summarizeAll(opts: { since?: string; agentId?: string }): Promise<SummarizeSummary> {
+    const total = this.store.countTracesNeedingSummaries(this.facets.map((f) => f.name), opts);
+    if (total > SUMMARIZE_BATCH) {
+      this.log(`${total} traces to summarize — one model call each; cap it with --limit`);
+    }
+
+    const acc: SummarizeSummary = { traces: 0, summaries: 0, embedded: 0, failures: [], remaining: total };
+    while (acc.remaining > 0) {
+      const pass = await this.summarize(opts);
+      acc.traces += pass.traces;
+      acc.summaries += pass.summaries;
+      acc.embedded += pass.embedded;
+      acc.failures.push(...pass.failures);
+      const progressed = pass.remaining < acc.remaining;
+      acc.remaining = pass.remaining;
+      if (!progressed) break;
+    }
+    return acc;
   }
 
   /** Embed any summary that lacks a vector, in batches, resumable. */
@@ -281,10 +339,16 @@ export class Pipeline {
     if (opts.otlpPath) ingest = this.ingestFile(opts.otlpPath, ingestOpts);
     else if (opts.jsonl !== undefined) ingest = this.ingestJsonl(opts.jsonl, ingestOpts);
 
-    const summarizeOpts: { limit?: number; since?: string; agentId?: string } = {};
-    if (opts.limit !== undefined) summarizeOpts.limit = opts.limit;
+    // An explicit --limit is the caller asking for a sample and accepting the
+    // cost; without one, analyze finishes the job. Capping silently at a batch
+    // and then printing shares as if they described everything ingested is the
+    // one thing this command must not do.
+    const summarizeOpts: { since?: string } = {};
     if (opts.since !== undefined) summarizeOpts.since = opts.since;
-    const summarize = await this.summarize(summarizeOpts);
+    const summarize =
+      opts.limit === undefined
+        ? await this.summarizeAll(summarizeOpts)
+        : await this.summarize({ ...summarizeOpts, limit: opts.limit });
 
     // Bootstrap and steady state are the same code path; discovery on an empty
     // registry simply has everything as its residual pile. Decided per agent,

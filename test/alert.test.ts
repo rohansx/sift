@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { runCheck, DEFAULT_FAIL_ON } from "../src/alert/check.ts";
+import { runCheck, renderCheck, DEFAULT_FAIL_ON } from "../src/alert/check.ts";
 import { pendingAlerts, markAlerted, WebhookAlerter } from "../src/alert/webhook.ts";
 import { Pipeline } from "../src/pipeline.ts";
 import { SiftStore } from "../src/store/db.ts";
@@ -166,6 +166,41 @@ describe("runCheck", () => {
     addWindow(store, "v3", [["SIFT-1", 5], [null, 5]]);
 
     assert.equal(runCheck(pipeline, { failOn: DEFAULT_FAIL_ON, from: "v1", to: "v2" }).ok, true);
+  });
+
+  test("refuses to vouch for a build whose traces are not all analyzed", () => {
+    // Passing here is the dangerous outcome: "no themes regressed" over a
+    // twentieth of the traffic reads exactly like a healthy build.
+    const { store, pipeline } = fixture();
+    addTheme(store, "SIFT-1");
+    addWindow(store, "v1", [["SIFT-1", 10]]);
+    addWindow(store, "v2", [["SIFT-1", 10]]);
+    for (let i = 0; i < 39; i++) {
+      store.insertTrace({ id: `pending-${i}`, agentId: AGENT, version: "v2", startedAt: "2026-07-01T00:00:00.000Z", text: "", meta: {} });
+    }
+
+    const result = runCheck(pipeline, { failOn: DEFAULT_FAIL_ON });
+    assert.equal(result.ok, false);
+    assert.equal(result.uncoveredTraces, 39);
+    assert.deepEqual(result.failures, [], "a partial corpus is not a regression and must not be reported as one");
+    assert.match(renderCheck(result), /cannot vouch/);
+
+    // someone sampling on purpose still needs a way through
+    const allowed = runCheck(pipeline, { failOn: DEFAULT_FAIL_ON, allowPartial: true });
+    assert.equal(allowed.ok, true);
+    assert.match(allowed.notes.join(" "), /39 traces are not summarized/);
+  });
+
+  test("a facet nobody has analyzed is a note, not a partial corpus", () => {
+    // Otherwise `--facet typo` fails the build with a coverage complaint
+    // instead of saying there is nothing there.
+    const { store, pipeline } = fixture();
+    addTheme(store, "SIFT-1");
+    addWindow(store, "v1", [["SIFT-1", 10]]);
+
+    const result = runCheck(pipeline, { failOn: DEFAULT_FAIL_ON, facet: "nope" });
+    assert.equal(result.ok, true);
+    assert.equal(result.uncoveredTraces, 0);
   });
 
   test("muted themes never fail a build", () => {

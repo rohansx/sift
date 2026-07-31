@@ -43,6 +43,8 @@ export interface FacetReport {
   residualCount: number;
   residualShare: number;
   rediscoverThreshold: number;
+  /** ingested but in no window at all — no share below counts them */
+  uncoveredTraces: number;
   rows: ThemeRow[];
 }
 
@@ -108,6 +110,10 @@ export function buildFacetReport(store: SiftStore, cfg: SiftConfig, opts: BuildR
     residualCount,
     residualShare: total === 0 ? 0 : residualCount / total,
     rediscoverThreshold: cfg.rediscoverResidualShare,
+    // The residual pile is traffic the registry could not explain; this is
+    // traffic the report never saw. Both belong on the page, and only one of
+    // them was here before.
+    uncoveredTraces: store.countUncoveredTraces(opts.agentId, opts.facet),
     rows,
   };
   if (window) report.window = window;

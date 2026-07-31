@@ -227,29 +227,47 @@ export class SiftStore {
     opts: { limit?: number; since?: string; agentId?: string } = {},
   ): Trace[] {
     if (facets.length === 0) return [];
-    const placeholders = facets.map(() => "?").join(", ");
-    const params: Array<string | number> = [...facets, facets.length];
-
-    let extra = "";
-    if (opts.since) {
-      extra += " AND t.started_at >= ?";
-      params.push(opts.since);
-    }
-    if (opts.agentId) {
-      extra += " AND t.agent_id = ?";
-      params.push(opts.agentId);
-    }
-    params.push(Math.floor(opts.limit ?? 500));
-
-    const sql = `
+    const { sql, params } = pendingSummaryFilter(facets, opts);
+    const paged = `
       SELECT t.* FROM traces t
-      WHERE (
-        SELECT COUNT(*) FROM facet_summaries fs
-        WHERE fs.trace_id = t.id AND fs.facet IN (${placeholders})
-      ) < ?${extra}
+      WHERE ${sql}
       ORDER BY t.started_at, t.id
       LIMIT ?`;
-    return (this.db.prepare(sql).all(...params) as Row[]).map(rowToTrace);
+    return (this.db.prepare(paged).all(...params, Math.floor(opts.limit ?? 500)) as Row[]).map(rowToTrace);
+  }
+
+  /**
+   * How many traces the query above would return if it were not paged — what a
+   * capped summarize pass is leaving behind.
+   *
+   * Shares one predicate with the page itself, so "1000 done, 39,000 to go"
+   * can never turn out to be arithmetic over two subtly different sets.
+   */
+  countTracesNeedingSummaries(facets: string[], opts: { since?: string; agentId?: string } = {}): number {
+    if (facets.length === 0) return 0;
+    const { sql, params } = pendingSummaryFilter(facets, opts);
+    return (this.db.prepare(`SELECT COUNT(*) c FROM traces t WHERE ${sql}`).get(...params) as { c: number }).c;
+  }
+
+  /**
+   * Traces this agent has for which the facet has no assignment row at all.
+   *
+   * Deliberately not "traces with no summary": a residual gets an assignment
+   * row with a NULL theme, so "no row at all" is exactly the set that no share,
+   * window, delta or gate in this tool can see. It also catches the later
+   * stages — summarized but never embedded, embedded but never assigned —
+   * which a summary-shaped question would call done.
+   */
+  countUncoveredTraces(agentId: string, facet: string): number {
+    return (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) c FROM traces t
+           WHERE t.agent_id = ?
+             AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.trace_id = t.id AND a.facet = ?)`,
+        )
+        .get(agentId, facet) as { c: number }
+    ).c;
   }
 
   /* ---------- summaries ---------- */
@@ -526,6 +544,28 @@ export class SiftStore {
 }
 
 type Row = Record<string, unknown>;
+
+/** The "still needs summarizing" predicate, shared by the page and its count. */
+function pendingSummaryFilter(
+  facets: string[],
+  opts: { since?: string; agentId?: string },
+): { sql: string; params: Array<string | number> } {
+  const placeholders = facets.map(() => "?").join(", ");
+  const params: Array<string | number> = [...facets, facets.length];
+  let sql = `(
+        SELECT COUNT(*) FROM facet_summaries fs
+        WHERE fs.trace_id = t.id AND fs.facet IN (${placeholders})
+      ) < ?`;
+  if (opts.since) {
+    sql += " AND t.started_at >= ?";
+    params.push(opts.since);
+  }
+  if (opts.agentId) {
+    sql += " AND t.agent_id = ?";
+    params.push(opts.agentId);
+  }
+  return { sql, params };
+}
 
 function rowToTrace(r: Row): Trace {
   const t: Trace = {

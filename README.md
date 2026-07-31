@@ -102,7 +102,7 @@ export SIFT_LLM_API_KEY=...          # any Anthropic or OpenAI-compatible endpoi
 export SIFT_EMBED_API_KEY=...
 
 sift ingest --otlp ./traces.jsonl    # OTLP GenAI spans as JSON lines
-sift summarize --preset chat         # 1 LLM call per trace, resumable
+sift summarize --preset chat         # 1 LLM call per trace, 1000 per pass
 sift bootstrap                       # discover themes
 sift assign                          # steady state: cheap, incremental
 
@@ -121,6 +121,18 @@ sift privacy --otlp ./traces.jsonl   # preview what the gate strips
 `sift help` lists everything. Every stage is resumable: `summarize` only touches
 traces missing a facet, `assign` only touches summaries without an assignment,
 so an interrupted run never pays twice.
+
+Summarizing is the stage that costs money — one model call per trace — so the
+two commands that do it are explicit about how much they will spend:
+
+- `sift summarize` does 1000 traces per pass and prints how many are left, so a
+  cron keeps a predictable bill.
+- `sift analyze` summarizes everything pending, because "ingest → issues list"
+  is a claim about the whole file. Cap it with `--limit <n>` (or narrow it with
+  `--since 7d`) when you only want a taste of a large history.
+- `sift report` warns when traces are in no window yet, and `sift check` exits
+  non-zero rather than green-lighting a build it has only partly seen. Pass
+  `--allow-partial` if you sample deliberately.
 
 ## Architecture
 
