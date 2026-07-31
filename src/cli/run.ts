@@ -2,7 +2,8 @@ import { parseArgs } from "node:util";
 import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { ConfigError, loadConfig, type DeepPartial, type SiftConfig } from "../config.ts";
+import { CONFIG_FILENAME, ConfigError, loadConfig, type DeepPartial, type SiftConfig } from "../config.ts";
+import { renderDoctor, runDoctor, type DoctorOptions } from "../doctor/index.ts";
 import { createPipeline, createPseudonymizer, Pipeline } from "../pipeline.ts";
 import { renderDeltaMarkdown, renderThemeMarkdown } from "../report/markdown.ts";
 import { renderDeltaTerminal, renderIssuesList } from "../report/terminal.ts";
@@ -61,6 +62,8 @@ LIFECYCLE
   relabel       change a theme's label without changing its identity
 
 OTHER
+  doctor        check config, keys, endpoints and what a run would cost —
+                before spending anything
   export        emit a theme as eval cases and a scorer prompt
   privacy       preview what the pseudonymization gate strips before the LLM
   demo          generate synthetic traces with planted failure modes
@@ -76,6 +79,9 @@ GLOBAL OPTIONS
                        analyze summarizes everything pending unless you cap it.
   --allow-partial      let check pass over a corpus that is not fully
                        summarized yet (it fails on one by default)
+  --no-probe           doctor: config and cost only, zero network calls
+  --price-in <usd>     doctor: USD per 1M input tokens, overriding the table
+  --price-out <usd>    doctor: USD per 1M output tokens
   --port <n>           serve: listen port (default 4318, the OTLP/HTTP one)
   --host <addr>        serve: bind address (default 127.0.0.1). Anything else
                        exposes an unauthenticated write endpoint — pair it
@@ -98,6 +104,7 @@ EXAMPLES
   sift serve                             # collector + dashboard on 127.0.0.1:4318
                                          # exporters need OTLP_PROTOCOL=http/json
   sift demo --out ./demo-traces.jsonl
+  sift doctor                            # config, auth, dimensions, and the bill
   sift analyze --otlp ./demo-traces.jsonl
   sift report
   sift delta --from v1.2 --to v1.3 --facet behavior
@@ -137,6 +144,9 @@ const OPTIONS = {
   "fail-on": { type: "string" },
   "min-share": { type: "string" },
   "allow-partial": { type: "boolean" },
+  "no-probe": { type: "boolean" },
+  "price-in": { type: "string" },
+  "price-out": { type: "string" },
   webhook: { type: "string" },
   on: { type: "string" },
   "dry-run": { type: "boolean" },
@@ -219,14 +229,20 @@ async function run(command: string, ctx: Ctx): Promise<number> {
       return withPipeline(ctx, cmdIngest);
     case "serve":
       return withPipeline(ctx, cmdServe);
+    // The four commands that call a model. requireKey turns a missing key into
+    // one sentence at construction instead of a thousand identical 401s, one
+    // per trace, each stored as a failure row.
     case "summarize":
-      return withPipeline(ctx, cmdSummarize);
+      return withPipeline(ctx, cmdSummarize, { requireKey: true });
     case "bootstrap":
-      return withPipeline(ctx, cmdBootstrap);
+      return withPipeline(ctx, cmdBootstrap, { requireKey: true });
     case "assign":
-      return withPipeline(ctx, cmdAssign);
+      return withPipeline(ctx, cmdAssign, { requireKey: true });
     case "analyze":
-      return withPipeline(ctx, cmdAnalyze);
+      return withPipeline(ctx, cmdAnalyze, { requireKey: true });
+    case "doctor":
+      // Deliberately not requireKey: reporting the missing key is its job.
+      return withPipeline(ctx, cmdDoctor);
     case "report":
       return withPipeline(ctx, cmdReport);
     case "delta":
@@ -252,10 +268,16 @@ async function run(command: string, ctx: Ctx): Promise<number> {
   }
 }
 
-async function withPipeline(ctx: Ctx, fn: (p: Pipeline, ctx: Ctx) => Promise<number> | number): Promise<number> {
-  const pipeline = createPipeline(ctx.cfg, {
+async function withPipeline(
+  ctx: Ctx,
+  fn: (p: Pipeline, ctx: Ctx) => Promise<number> | number,
+  opts: { requireKey?: boolean } = {},
+): Promise<number> {
+  const create: Parameters<typeof createPipeline>[1] = {
     log: ctx.json ? () => {} : (m) => process.stderr.write(`${m}\n`),
-  });
+  };
+  if (opts.requireKey) create.requireKey = true;
+  const pipeline = createPipeline(ctx.cfg, create);
   try {
     return await fn(pipeline, ctx);
   } finally {
@@ -470,6 +492,45 @@ async function cmdServe(pipeline: Pipeline, ctx: Ctx): Promise<number> {
   });
   process.stdout.write(`\nstopped. ${pipeline.store.countPendingSpans()} spans still staged.\n`);
   return 0;
+}
+
+/**
+ * The preflight. Everything downstream is per-trace and paid, so the cheapest
+ * possible thing sift can do is tell you what is wrong, and what it will cost,
+ * before it starts. Exits 1 on a failed check so a provisioning script can gate
+ * on it; a warning is not a failure.
+ */
+async function cmdDoctor(pipeline: Pipeline, ctx: Ctx): Promise<number> {
+  const opts: DoctorOptions = { store: pipeline.store, keySources: keySources(ctx.cfg) };
+  if (ctx.values["no-probe"] === true) opts.probe = false;
+  if (typeof ctx.values.agent === "string") opts.agentId = ctx.values.agent;
+  if (typeof ctx.values.since === "string") opts.since = Pipeline.resolveSince(ctx.values.since);
+  const priceIn = floatOption(ctx, "price-in");
+  const priceOut = floatOption(ctx, "price-out");
+  if (priceIn !== undefined) opts.priceIn = priceIn;
+  if (priceOut !== undefined) opts.priceOut = priceOut;
+
+  const result = await runDoctor(ctx.cfg, opts);
+  if (ctx.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  else process.stdout.write(renderDoctor(result));
+  return result.ok ? 0 : 1;
+}
+
+/**
+ * Where each key came from, so doctor can say "from SIFT_LLM_API_KEY" without
+ * ever being handed the value's origin to guess at — and warn about a key that
+ * lives in a file. Doctor itself reads no environment; this is the only place
+ * that does.
+ */
+function keySources(cfg: SiftConfig): { llm?: string; embeddings?: string } {
+  const out: { llm?: string; embeddings?: string } = {};
+  if (cfg.llm.apiKey) {
+    out.llm = process.env.SIFT_LLM_API_KEY === cfg.llm.apiKey ? "SIFT_LLM_API_KEY" : CONFIG_FILENAME;
+  }
+  if (cfg.embeddings.apiKey) {
+    out.embeddings = process.env.SIFT_EMBED_API_KEY === cfg.embeddings.apiKey ? "SIFT_EMBED_API_KEY" : CONFIG_FILENAME;
+  }
+  return out;
 }
 
 async function cmdSummarize(pipeline: Pipeline, ctx: Ctx): Promise<number> {

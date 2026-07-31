@@ -21,6 +21,8 @@ export interface LlmProviderOptions {
   maxTraceChars?: number;
   /** how many member summaries a labeler sends for a cluster */
   labelSampleSize?: number;
+  /** per-attempt request timeout; see postJson */
+  timeoutMs?: number;
 }
 
 /** Keeps the head and the tail: the setup and the failure are both load-bearing. */
@@ -36,14 +38,9 @@ export function clipTrace(text: string, maxChars = DEFAULT_MAX_TRACE_CHARS): str
  * is not acceptable. Values are coerced to strings; non-scalars are dropped.
  */
 export function parseFacetJson(raw: string): Record<string, string> {
-  const candidates: string[] = [];
-  const fenced = raw.replace(/```(?:json)?/gi, "").trim();
-  candidates.push(fenced);
-  const start = fenced.indexOf("{");
-  const end = fenced.lastIndexOf("}");
-  if (start !== -1 && end > start) candidates.push(fenced.slice(start, end + 1));
+  const cleaned = stripThinking(raw).replace(/```(?:json)?/gi, "").trim();
 
-  for (const candidate of candidates) {
+  for (const candidate of [cleaned, ...braceCandidates(cleaned)]) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
@@ -52,12 +49,86 @@ export function parseFacetJson(raw: string): Record<string, string> {
         if (typeof v === "string") out[k] = v;
         else if (typeof v === "number" || typeof v === "boolean") out[k] = String(v);
       }
-      return out;
+      // An object of nothing usable is not an answer; keep scanning rather than
+      // storing a row of blanks that looks like a successful summarization.
+      if (Object.keys(out).length > 0) return out;
     } catch {
       // try the next candidate
     }
   }
   throw new Error(`could not parse facet JSON from model output: ${raw.slice(0, 400)}`);
+}
+
+/**
+ * A reasoning model narrates before it answers, and its scratchpad is prose
+ * full of braces. Dropping it first is what keeps the scan below honest.
+ * An unterminated <think> means the reply was cut off mid-thought — there is no
+ * JSON after it either way.
+ */
+function stripThinking(raw: string): string {
+  return raw.replace(/<think>[\s\S]*?<\/think>/gi, " ").replace(/<think>[\s\S]*$/i, " ");
+}
+
+/**
+ * Every balanced-brace object in the text, left to right, so the *first* one
+ * that parses wins. The old first-{-to-last-} slice spanned from a brace in the
+ * preamble to a brace in the sign-off and parsed as neither.
+ *
+ * Quotes are tracked so a brace inside a summary string does not close the
+ * object. Once an object closes, the scan resumes after it rather than inside
+ * it: a nested `{"a":1}` is part of its parent, not a rival answer, and
+ * preferring it would return a fragment over the reply that follows. An object
+ * that never closes yields nothing and the scan continues, which is what finds
+ * the real JSON after a truncated one.
+ *
+ * Capped because a reply is bounded by max_tokens and an O(n²) scan over
+ * anything larger would be a denial of service on a malformed body.
+ */
+function braceCandidates(text: string, cap = 32): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < text.length && out.length < cap; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j]!;
+      if (escaped) escaped = false;
+      else if (ch === "\\" && inString) escaped = true;
+      else if (ch === '"') inString = !inString;
+      else if (inString) continue;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        out.push(text.slice(i, j + 1));
+        i = j;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The output budget, scaled by facet count. A fixed 400 truncated a six-facet
+ * reply mid-string, which `parseFacetJson` could only report as a parse error —
+ * on every trace, every run, forever, because a failed trace stays pending and
+ * gets paid for again.
+ */
+export function maxTokensFor(facets: FacetDef[]): number {
+  return Math.max(400, 120 * facets.length);
+}
+
+/**
+ * Truncation is not a parse error and must not be reported as one: the reply is
+ * well-formed JSON that simply stops, and the fix is a budget, not a retry.
+ */
+function assertNotTruncated(reason: string | undefined, maxTokens: number): void {
+  if (reason === "max_tokens" || reason === "length") {
+    throw new Error(
+      `model output was truncated at ${maxTokens} tokens before the JSON closed — ` +
+        `use fewer facets or shorter facet instructions`,
+    );
+  }
 }
 
 export function buildFacetPrompt(trace: Trace, facets: FacetDef[], maxTraceChars: number): string {
@@ -93,6 +164,7 @@ abstract class HttpLlm {
   protected sleep: (ms: number) => Promise<void>;
   protected maxTraceChars: number;
   protected labelSampleSize: number;
+  protected timeoutMs: number | undefined;
 
   constructor(cfg: LlmConfig, opts: LlmProviderOptions = {}) {
     this.cfg = cfg;
@@ -101,29 +173,26 @@ abstract class HttpLlm {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.maxTraceChars = opts.maxTraceChars ?? DEFAULT_MAX_TRACE_CHARS;
     this.labelSampleSize = opts.labelSampleSize ?? 20;
+    this.timeoutMs = opts.timeoutMs;
   }
 
   /** One prompt in, one text completion out — the only thing sift asks of an LLM. */
   protected abstract complete(prompt: string, maxTokens: number): Promise<string>;
 
   protected post<T>(url: string, headers: Record<string, string>, body: unknown, label: string): Promise<T> {
-    return postJson<T>(url, headers, body, {
+    const opts: Parameters<typeof postJson>[3] = {
       fetchImpl: this.fetchImpl,
       maxRetries: this.maxRetries,
       sleep: this.sleep,
       label,
-    });
-  }
-}
-
-export class AnthropicSummarizer extends HttpLlm implements Summarizer {
-  async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
-    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), 400);
-    return toSummaries(trace, facets, parseFacetJson(text));
+    };
+    if (this.timeoutMs !== undefined) opts.timeoutMs = this.timeoutMs;
+    return postJson<T>(url, headers, body, opts);
   }
 
-  protected override async complete(prompt: string, maxTokens: number): Promise<string> {
-    const data = await this.post<{ content: Array<{ type: string; text?: string }> }>(
+  /** Anthropic /v1/messages. Thinking blocks are tolerated: only text is kept. */
+  protected async anthropicComplete(prompt: string, maxTokens: number, label: string): Promise<string> {
+    const data = await this.post<{ content: Array<{ type: string; text?: string }>; stop_reason?: string }>(
       `${trimSlash(this.cfg.baseUrl)}/v1/messages`,
       {
         "content-type": "application/json",
@@ -131,29 +200,60 @@ export class AnthropicSummarizer extends HttpLlm implements Summarizer {
         "anthropic-version": "2023-06-01",
       },
       { model: this.cfg.model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
-      "summarizer",
+      label,
     );
+    assertNotTruncated(data.stop_reason, maxTokens);
     return data.content
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
       .join("");
   }
+
+  /** Any OpenAI-compatible /v1/chat/completions: OpenAI, ollama, llama.cpp, vLLM. */
+  protected async openAiComplete(prompt: string, maxTokens: number, label: string): Promise<string> {
+    const url = `${trimSlash(this.cfg.baseUrl)}/v1/chat/completions`;
+    const headers = { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey ?? ""}` };
+    const base = { model: this.cfg.model, messages: [{ role: "user", content: prompt }] };
+    type Chat = { choices: Array<{ message?: { content?: string }; finish_reason?: string }> };
+
+    let data: Chat;
+    try {
+      data = await this.post<Chat>(url, headers, { ...base, max_tokens: maxTokens }, label);
+    } catch (err) {
+      // The one 400 that is not permanent: newer OpenAI models reject max_tokens
+      // and name the field they want instead. postJson is right not to retry a
+      // 400 in general, so the rename is retried here, once, on that body only.
+      if (!wantsMaxCompletionTokens(err)) throw err;
+      data = await this.post<Chat>(url, headers, { ...base, max_completion_tokens: maxTokens }, label);
+    }
+    assertNotTruncated(data.choices[0]?.finish_reason, maxTokens);
+    return data.choices[0]?.message?.content ?? "";
+  }
+}
+
+function wantsMaxCompletionTokens(err: unknown): boolean {
+  return err instanceof Error && / HTTP 400: /.test(err.message) && err.message.includes("max_completion_tokens");
+}
+
+export class AnthropicSummarizer extends HttpLlm implements Summarizer {
+  async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
+    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), maxTokensFor(facets));
+    return toSummaries(trace, facets, parseFacetJson(text));
+  }
+
+  protected override complete(prompt: string, maxTokens: number): Promise<string> {
+    return this.anthropicComplete(prompt, maxTokens, "summarizer");
+  }
 }
 
 export class OpenAiSummarizer extends HttpLlm implements Summarizer {
   async summarize(trace: Trace, facets: FacetDef[]): Promise<FacetSummary[]> {
-    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), 400);
+    const text = await this.complete(buildFacetPrompt(trace, facets, this.maxTraceChars), maxTokensFor(facets));
     return toSummaries(trace, facets, parseFacetJson(text));
   }
 
-  protected override async complete(prompt: string, maxTokens: number): Promise<string> {
-    const data = await this.post<{ choices: Array<{ message?: { content?: string } }> }>(
-      `${trimSlash(this.cfg.baseUrl)}/v1/chat/completions`,
-      { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey ?? ""}` },
-      { model: this.cfg.model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
-      "summarizer",
-    );
-    return data.choices[0]?.message?.content ?? "";
+  protected override complete(prompt: string, maxTokens: number): Promise<string> {
+    return this.openAiComplete(prompt, maxTokens, "summarizer");
   }
 }
 
@@ -184,26 +284,10 @@ export class HttpLabeler extends HttpLlm implements Labeler {
     };
   }
 
-  protected override async complete(prompt: string, maxTokens: number): Promise<string> {
-    if (this.cfg.provider === "openai") {
-      const data = await this.post<{ choices: Array<{ message?: { content?: string } }> }>(
-        `${trimSlash(this.cfg.baseUrl)}/v1/chat/completions`,
-        { "content-type": "application/json", authorization: `Bearer ${this.cfg.apiKey ?? ""}` },
-        { model: this.cfg.model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
-        "labeler",
-      );
-      return data.choices[0]?.message?.content ?? "";
-    }
-    const data = await this.post<{ content: Array<{ type: string; text?: string }> }>(
-      `${trimSlash(this.cfg.baseUrl)}/v1/messages`,
-      { "content-type": "application/json", "x-api-key": this.cfg.apiKey ?? "", "anthropic-version": "2023-06-01" },
-      { model: this.cfg.model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] },
-      "labeler",
-    );
-    return data.content
-      .filter((c) => c.type === "text")
-      .map((c) => c.text ?? "")
-      .join("");
+  protected override complete(prompt: string, maxTokens: number): Promise<string> {
+    return this.cfg.provider === "openai"
+      ? this.openAiComplete(prompt, maxTokens, "labeler")
+      : this.anthropicComplete(prompt, maxTokens, "labeler");
   }
 }
 

@@ -500,7 +500,8 @@ export function createPseudonymizer(cfg: SiftConfig): Pseudonymizer {
   return new Pseudonymizer(opts);
 }
 
-function withPrivacyGate(summarizer: Summarizer, cfg: SiftConfig): Summarizer {
+/** Exported so `sift doctor` probes through the exact gate a real run uses. */
+export function withPrivacyGate(summarizer: Summarizer, cfg: SiftConfig): Summarizer {
   if (cfg.privacy.mode === "off") return summarizer;
   return new RedactingSummarizer(summarizer, createPseudonymizer(cfg));
 }

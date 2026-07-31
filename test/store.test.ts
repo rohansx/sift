@@ -247,6 +247,45 @@ describe("facet summaries", () => {
     });
   });
 
+  test("the cost estimate measures the same set the count counts", () => {
+    // The shared-predicate claim, asserted rather than commented: a cost
+    // estimate that quietly disagrees with "N still pending" about which traces
+    // it means is a wrong bill wearing a right-looking number.
+    withTempStore((store) => {
+      const facets = ["goal", "behavior"];
+      store.insertTraces([
+        trace({ id: "done", text: "x".repeat(100) }),
+        trace({ id: "half", text: "x".repeat(200) }),
+        trace({ id: "pending", text: "x".repeat(300) }),
+        trace({ id: "other-agent", agentId: "coder", text: "x".repeat(400) }),
+      ]);
+      store.insertSummary({ traceId: "done", facet: "goal", summary: "g" });
+      store.insertSummary({ traceId: "done", facet: "behavior", summary: "b" });
+      store.insertSummary({ traceId: "half", facet: "goal", summary: "g" });
+
+      for (const scope of [{}, { agentId: "support-bot" }, { agentId: "coder" }, { since: "2026-07-01T09:00:00.000Z" }]) {
+        assert.equal(
+          store.pendingSummaryStats(facets, scope).traces,
+          store.countTracesNeedingSummaries(facets, scope),
+          `scope ${JSON.stringify(scope)}`,
+        );
+      }
+      // half (200) + pending (300) + other-agent (400); "done" is finished.
+      assert.equal(store.pendingSummaryStats(facets).chars, 900);
+      assert.deepEqual(store.pendingSummaryStats([]), { traces: 0, chars: 0 });
+    });
+  });
+
+  test("a long trace is measured as it is sent, not as it is stored", () => {
+    // clipTrace caps what actually reaches the model; summing raw lengths would
+    // overstate the bill on any corpus holding long traces.
+    withTempStore((store) => {
+      store.insertTraces([trace({ id: "huge", text: "x".repeat(30_000) })]);
+      assert.equal(store.pendingSummaryStats(["goal"]).chars, 24_000);
+      assert.equal(store.pendingSummaryStats(["goal"], { maxChars: 1000 }).chars, 1000);
+    });
+  });
+
   test("counts traces no window can see, residuals excluded", () => {
     // A residual has an assignment row with a NULL theme: the report counts it
     // and can say so. A trace with no row at all is the invisible one.

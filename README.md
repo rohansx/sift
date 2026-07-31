@@ -139,6 +139,7 @@ Against your own traces, point the summarizer at a real model:
 export SIFT_LLM_API_KEY=...          # any Anthropic or OpenAI-compatible endpoint
 export SIFT_EMBED_API_KEY=...
 
+sift doctor                          # config, auth, model, dimensions, and what this corpus will cost
 sift ingest --otlp ./traces.jsonl    # OTLP GenAI spans as JSON lines
 sift summarize --preset chat         # 1 LLM call per trace, 1000 per pass
 sift bootstrap                       # discover themes
@@ -171,6 +172,10 @@ two commands that do it are explicit about how much they will spend:
 - `sift report` warns when traces are in no window yet, and `sift check` exits
   non-zero rather than green-lighting a build it has only partly seen. Pass
   `--allow-partial` if you sample deliberately.
+
+[docs/COST.md](docs/COST.md) has the token math behind those numbers, a worked
+table from 1k to 100k traces, and the ollama recipe that runs the whole hosted
+path locally for nothing — which is also how you verify it without a key.
 
 ## Architecture
 

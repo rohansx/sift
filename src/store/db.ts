@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import type { Assignment, FacetSummary, Theme, ThemeState, Trace } from "../types.ts";
+import { DEFAULT_MAX_TRACE_CHARS } from "../facets/summarize.ts";
 
 /**
  * Single-file SQLite via node:sqlite (Node >= 22). No native deps, no infra,
@@ -295,6 +296,31 @@ export class SiftStore {
     if (facets.length === 0) return 0;
     const { sql, params } = pendingSummaryFilter(facets, opts);
     return (this.db.prepare(`SELECT COUNT(*) c FROM traces t WHERE ${sql}`).get(...params) as { c: number }).c;
+  }
+
+  /**
+   * The same set again, measured rather than counted: how many traces a
+   * summarize pass over this scope would send, and how many characters of trace
+   * text it would actually put in the prompts.
+   *
+   * The MIN() is not a nicety. `clipTrace` caps what gets sent at
+   * DEFAULT_MAX_TRACE_CHARS, so summing raw lengths overstates the bill on any
+   * corpus holding long traces — and an over-estimate that arrives as a dollar
+   * figure is exactly the kind of wrong that stops someone running the tool.
+   * Sharing `pendingSummaryFilter` with the count query is the other half: an
+   * estimate can then never quietly disagree with `sift summarize`'s "N still
+   * pending" about which traces it is talking about.
+   */
+  pendingSummaryStats(
+    facets: string[],
+    opts: { since?: string; agentId?: string; maxChars?: number } = {},
+  ): { traces: number; chars: number } {
+    if (facets.length === 0) return { traces: 0, chars: 0 };
+    const { sql, params } = pendingSummaryFilter(facets, opts);
+    const row = this.db
+      .prepare(`SELECT COUNT(*) c, COALESCE(SUM(MIN(LENGTH(t.text), ?)), 0) n FROM traces t WHERE ${sql}`)
+      .get(opts.maxChars ?? DEFAULT_MAX_TRACE_CHARS, ...params) as { c: number; n: number };
+    return { traces: row.c, chars: row.n };
   }
 
   /**

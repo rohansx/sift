@@ -32,6 +32,14 @@ network, and none may depend on wall-clock time or `Math.random` for its
 assertions. The suite is the thing that has to stay trustworthy when the LLM in
 the loop is not.
 
+There is exactly one documented exception, and it is named here so the rule does
+not quietly become untrue: **`test/live.test.ts`** talks to a real endpoint. It
+is skipped unless `SIFT_LLM_API_KEY` or `SIFT_LLM_BASE_URL` is set, so CI — which
+has neither — still runs fully offline, and the spec reporter prints the reason
+next to each skipped test rather than a green tick. Running it costs two
+completions, one label and ~30 short embeddings (under a cent), or nothing at all
+against ollama — see [COST.md](./COST.md).
+
 - **LLM and embeddings are interfaces.** `Summarizer` and `Embedder` have
   offline implementations in `src/testing/fakes.ts`:
   - `HashEmbedder` (shipped, in `src/embed/index.ts`) — deterministic
@@ -82,7 +90,9 @@ test/
   report.test.ts         rendering
   alert.test.ts          the CI gate and webhook de-duplication
   export.test.ts         generated eval artifacts
+  doctor.test.ts         the preflight: coherence, probes, cost math, all stubbed
   cli.test.ts            child_process, real DB, offline providers
+  live.test.ts           the only file that touches a network; skipped without a key
   harness.test.ts        the packaging claims: engines, empty dependencies
   e2e.test.ts            the demo: does sift find a planted failure mode?
   paraphrase.test.ts     does it still find it when every trace is worded differently?
@@ -101,9 +111,16 @@ real embedder and a real summarizer. Two assumptions are outstanding:
    problem that does not exist), and
 2. that real embeddings actually hit that spread.
 
-Until someone measures both and updates the constant, the honest reading is:
-sift's clustering is verified *given* an embedder of stated quality, and the
-offline `hash` embedder is demonstrably not one.
+Both now have a way to be measured. `test/live.test.ts` summarizes a fixture
+trace with the configured model and prints the mean intra-concept and
+inter-concept cosine over the paraphrase corpus — those two printed numbers are
+what `REAL_EMBEDDING_GEOMETRY` should be set from. It runs on `npm test` with a
+key present, or for free against ollama ([COST.md](./COST.md)).
+
+Until someone runs it and updates the constant, the honest reading is unchanged:
+sift's clustering is verified *given* an embedder of stated quality, the offline
+`hash` embedder is demonstrably not one, and **the hosted path is implemented and
+unit-tested against stubbed responses but has not been run against a live API.**
 
 ## What "done" means for a phase
 

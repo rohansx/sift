@@ -650,6 +650,84 @@ describe("serve", () => {
   });
 });
 
+describe("doctor: the preflight", () => {
+  test("the offline configuration passes, with both probes visibly skipped", () => {
+    const r = sift(["doctor"]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /– llm probe/);
+    assert.match(r.stdout, /– embed probe/);
+    // By this point in the suite the corpus is fully summarized, which is its
+    // own answer: doctor reports there is nothing left to spend on.
+    assert.match(r.stdout, /cost estimate/);
+  });
+
+  test("with traces pending it prices them, and shows its working", () => {
+    const pendingDb = join(dir, "pending.db");
+    const ingest = sift(["ingest", "--otlp", tracesPath], { env: { SIFT_DB: pendingDb } });
+    assert.equal(ingest.code, 0, ingest.stderr);
+
+    const r = sift(["doctor", "--no-probe"], { env: { SIFT_DB: pendingDb } });
+    assert.match(r.stdout, /cost estimate for \d+ pending traces/);
+    assert.match(r.stdout, /chars of fixed prompt overhead per trace/);
+    assert.match(r.stdout, /this is an estimate, not a quote/);
+  });
+
+  test("--json is the same result, machine-readable", () => {
+    const r = sift(["doctor", "--json"]);
+    assert.equal(r.code, 0);
+    const parsed = JSON.parse(r.stdout) as { ok: boolean; checks: Array<{ name: string }>; estimate: unknown };
+    assert.equal(parsed.ok, true);
+    assert.ok(parsed.checks.some((c) => c.name === "coherence"));
+    assert.ok(parsed.estimate);
+  });
+
+  test("a hosted provider with no key fails, and says which variable to set", () => {
+    const r = sift(["doctor", "--no-probe"], { env: { SIFT_LLM_PROVIDER: "anthropic", SIFT_LLM_API_KEY: "" } });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /SIFT_LLM_API_KEY/);
+    assert.match(r.stdout, /✗ llm key/);
+  });
+
+  test("an openai provider left on the anthropic default fails coherence", () => {
+    const r = sift(["doctor", "--no-probe"], { env: { SIFT_LLM_PROVIDER: "openai", SIFT_LLM_API_KEY: "sk-x" } });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /✗ coherence/);
+    assert.match(r.stdout, /SIFT_LLM_BASE_URL/);
+  });
+
+  test("--price-in and --price-out override the table", () => {
+    const r = sift(["doctor", "--no-probe", "--json", "--price-in", "3", "--price-out", "15"], {
+      env: { SIFT_LLM_PROVIDER: "anthropic", SIFT_LLM_API_KEY: "sk-x" },
+    });
+    const parsed = JSON.parse(r.stdout) as { estimate: { assumptions: string[] } };
+    assert.ok(parsed.estimate.assumptions.some((a) => a.includes("prices given on the command line")));
+  });
+});
+
+describe("a missing API key fails once, not once per trace", () => {
+  // The behaviour change: `requireKey` used to be dead. Without it, sift sent
+  // an empty x-api-key, took a non-retryable 401 per trace, and reported "N
+  // traces failed" instead of one sentence.
+  const hosted = { SIFT_LLM_PROVIDER: "anthropic", SIFT_LLM_API_KEY: "" };
+
+  for (const cmd of ["summarize", "analyze", "bootstrap", "assign"]) {
+    test(`${cmd} refuses to start`, () => {
+      const r = sift([cmd], { env: hosted });
+      assert.equal(r.code, 1, r.stdout);
+      assert.match(r.stderr, /SIFT_LLM_API_KEY/);
+      assert.ok(!r.stdout.includes("failed"), "it should never have reached a trace");
+    });
+  }
+
+  for (const cmd of ["report", "themes", "check", "doctor"]) {
+    test(`${cmd} still works — it never calls a model`, () => {
+      const r = sift([cmd, "--allow-partial"], { env: hosted });
+      assert.notEqual(r.code, 2, r.stderr);
+      assert.ok(!r.stderr.includes("needs an API key"), r.stderr);
+    });
+  }
+});
+
 describe("output hygiene", () => {
   test("progress goes to stderr so stdout stays pipeable", () => {
     const r = sift(["report", "--format", "md"]);

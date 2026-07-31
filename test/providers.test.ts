@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { AnthropicSummarizer, OpenAiSummarizer, HttpLabeler, clipTrace, parseFacetJson, createSummarizer, createLabeler } from "../src/facets/summarize.ts";
+import { AnthropicSummarizer, OpenAiSummarizer, HttpLabeler, clipTrace, parseFacetJson, maxTokensFor, createSummarizer, createLabeler } from "../src/facets/summarize.ts";
 import { HashEmbedder, OpenAICompatEmbedder, createEmbedder } from "../src/embed/index.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { cosine, norm } from "../src/cluster/vectors.ts";
@@ -23,7 +23,7 @@ const TRACE: Trace = {
 };
 
 /** A fetch stub that records calls and replays scripted responses. */
-function stubFetch(responses: Array<{ status?: number; body: unknown } | Error>) {
+function stubFetch(responses: Array<{ status?: number; body: unknown; headers?: Record<string, string> } | Error>) {
   const calls: Array<{ url: string; init: RequestInit; body: Record<string, unknown> }> = [];
   let i = 0;
   const impl = (async (url: string | URL, init: RequestInit = {}) => {
@@ -36,7 +36,10 @@ function stubFetch(responses: Array<{ status?: number; body: unknown } | Error>)
     });
     if (next instanceof Error) throw next;
     const status = next.status ?? 200;
-    return new Response(typeof next.body === "string" ? next.body : JSON.stringify(next.body), { status });
+    return new Response(typeof next.body === "string" ? next.body : JSON.stringify(next.body), {
+      status,
+      headers: next.headers ?? {},
+    });
   }) as unknown as typeof fetch;
   return { impl, calls, get count() { return i; } };
 }
@@ -63,6 +66,80 @@ describe("parseFacetJson", () => {
 
   test("unparseable output throws with the raw text so failures are debuggable", () => {
     assert.throws(() => parseFacetJson("I refuse to answer"), /I refuse to answer/);
+  });
+
+  test("a reasoning model's scratchpad does not poison the answer", () => {
+    // The documented local recipe is ollama + qwen, which thinks out loud. The
+    // old first-{-to-last-} slice spanned from a brace in the scratchpad to the
+    // last brace of the reply and parsed as neither.
+    const raw =
+      "<think>The user wants JSON like {facet: value}. Let me check the outcome field {again}.</think>\n" +
+      '{"goal":"a refund","behavior":"checked the order"}';
+    assert.deepEqual(parseFacetJson(raw), { goal: "a refund", behavior: "checked the order" });
+  });
+
+  test("an unterminated <think> block is dropped rather than parsed", () => {
+    assert.throws(() => parseFacetJson('<think>I should answer with {"goal": "something"} probably'), /could not parse/);
+  });
+
+  test("two objects: the first one that parses is the answer", () => {
+    assert.deepEqual(parseFacetJson('{"goal":"a"}\nOr alternatively: {"goal":"b"}'), { goal: "a" });
+  });
+
+  test("a brace inside a summary string does not end the object", () => {
+    assert.deepEqual(parseFacetJson('Here:\n{"goal":"fix the {placeholder} bug","behavior":"b"}\nDone.'), {
+      goal: "fix the {placeholder} bug",
+      behavior: "b",
+    });
+  });
+
+  test("an object of nothing usable is skipped in favour of the real answer", () => {
+    // Two things at once: an object whose only value is a nested object yields
+    // nothing usable and must not be accepted (it would write a full set of
+    // "unclear" rows and mark the trace done — a silent wrong answer), and the
+    // nested `{"a":1}` inside it is part of its parent, not a rival candidate.
+    assert.deepEqual(parseFacetJson('{"nested":{"a":1}}\n{"goal":"the real one"}'), { goal: "the real one" });
+  });
+
+  test("a reply with nothing usable anywhere still throws", () => {
+    assert.throws(() => parseFacetJson('{"nested":{"a":1}}'), /could not parse/);
+  });
+});
+
+describe("maxTokensFor", () => {
+  test("scales with facet count, with a floor", () => {
+    assert.equal(maxTokensFor(FACETS), 400);
+    assert.equal(maxTokensFor(Array.from({ length: 8 }, (_, i) => ({ name: `f${i}`, instruction: "x" }))), 960);
+  });
+
+  test("the summarizer asks for the scaled budget, not a hardcoded 400", async () => {
+    const facets = Array.from({ length: 8 }, (_, i) => ({ name: `f${i}`, instruction: "x" }));
+    const fetchStub = stubFetch([{ body: anthropicBody('{"f0":"a"}') }]);
+    await new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl }).summarize(TRACE, facets);
+    assert.equal(fetchStub.calls[0]!.body.max_tokens, 960);
+  });
+});
+
+describe("truncation", () => {
+  // A truncated reply is well-formed JSON that simply stops. Reported as a
+  // parse error it looks like a bad model; reported as truncation it names its
+  // own fix. It happens on every trace, forever, until someone acts on it.
+  test("anthropic stop_reason max_tokens is reported as truncation", async () => {
+    const fetchStub = stubFetch([{ body: { content: [{ type: "text", text: '{"goal":"a' }], stop_reason: "max_tokens" } }]);
+    const s = new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl });
+    await assert.rejects(() => s.summarize(TRACE, FACETS), /truncated at 400 tokens/);
+  });
+
+  test("openai finish_reason length is reported as truncation", async () => {
+    const fetchStub = stubFetch([{ body: { choices: [{ message: { content: '{"goal":"a' }, finish_reason: "length" }] } }]);
+    const s = new OpenAiSummarizer({ ...DEFAULT_CONFIG.llm, provider: "openai", baseUrl: "http://x" }, { fetchImpl: fetchStub.impl });
+    await assert.rejects(() => s.summarize(TRACE, FACETS), /truncated/);
+  });
+
+  test("a normal stop_reason is not mistaken for truncation", async () => {
+    const fetchStub = stubFetch([{ body: { content: [{ type: "text", text: '{"goal":"a","behavior":"b"}' }], stop_reason: "end_turn" } }]);
+    const s = new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl });
+    assert.equal((await s.summarize(TRACE, FACETS))[0]!.summary, "a");
   });
 });
 
@@ -153,6 +230,96 @@ describe("AnthropicSummarizer", () => {
   });
 });
 
+describe("retries and rate limits", () => {
+  const summarizer = (fetchImpl: typeof fetch, sleep: (ms: number) => Promise<void>) =>
+    new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl, sleep });
+
+  test("Retry-After in seconds is honoured over the backoff schedule", async () => {
+    // 500ms of backoff against a provider asking for 30s is a run that fails
+    // for no reason. The provider's number wins.
+    const fetchStub = stubFetch([
+      { status: 429, body: { type: "error", error: { type: "rate_limit_error" } }, headers: { "retry-after": "30" } },
+      { body: anthropicBody('{"goal":"g","behavior":"b"}') },
+    ]);
+    const slept: number[] = [];
+    await summarizer(fetchStub.impl, async (ms) => void slept.push(ms)).summarize(TRACE, FACETS);
+    assert.deepEqual(slept, [30_000]);
+  });
+
+  test("Retry-After as an HTTP-date is honoured too", async () => {
+    const when = new Date(Date.now() + 45_000).toUTCString();
+    const fetchStub = stubFetch([
+      { status: 503, body: "unavailable", headers: { "retry-after": when } },
+      { body: anthropicBody('{"goal":"g","behavior":"b"}') },
+    ]);
+    const slept: number[] = [];
+    await summarizer(fetchStub.impl, async (ms) => void slept.push(ms)).summarize(TRACE, FACETS);
+    assert.ok(slept[0]! > 40_000 && slept[0]! <= 45_000, `slept ${slept[0]}ms for a 45s date`);
+  });
+
+  test("an absurd Retry-After is clamped, not obeyed", async () => {
+    const fetchStub = stubFetch([
+      { status: 429, body: "slow down", headers: { "retry-after": "86400" } },
+      { body: anthropicBody('{"goal":"g","behavior":"b"}') },
+    ]);
+    const slept: number[] = [];
+    await summarizer(fetchStub.impl, async (ms) => void slept.push(ms)).summarize(TRACE, FACETS);
+    assert.equal(slept[0], 120_000, "a day is not a retry, it is a hang");
+  });
+
+  test("a garbage Retry-After falls back to exponential backoff", async () => {
+    const fetchStub = stubFetch([
+      { status: 429, body: "slow down", headers: { "retry-after": "soon" } },
+      { body: anthropicBody('{"goal":"g","behavior":"b"}') },
+    ]);
+    const slept: number[] = [];
+    await summarizer(fetchStub.impl, async (ms) => void slept.push(ms)).summarize(TRACE, FACETS);
+    assert.equal(slept[0], 500);
+  });
+
+  test("a 5xx with no header keeps the exponential schedule", async () => {
+    const fetchStub = stubFetch([{ status: 500, body: "boom" }]);
+    const slept: number[] = [];
+    const s = new AnthropicSummarizer(DEFAULT_CONFIG.llm, {
+      fetchImpl: fetchStub.impl,
+      maxRetries: 3,
+      sleep: async (ms) => void slept.push(ms),
+    });
+    await assert.rejects(() => s.summarize(TRACE, FACETS));
+    assert.deepEqual(slept, [500, 1000, 2000]);
+  });
+
+  test("a huge error body is truncated before it becomes a thousand failure rows", async () => {
+    // A proxy's HTML 500, stored per failed trace and printed by --json, is
+    // megabytes of noise that says nothing the first 400 chars did not.
+    const html = `<!doctype html><html><body>${"gateway error ".repeat(500)}</body></html>`;
+    const fetchStub = stubFetch([{ status: 502, body: html }]);
+    const s = new AnthropicSummarizer(DEFAULT_CONFIG.llm, { fetchImpl: fetchStub.impl, maxRetries: 0, sleep: async () => {} });
+    await assert.rejects(
+      () => s.summarize(TRACE, FACETS),
+      (err: Error) => {
+        assert.ok(err.message.length < 500, `error message was ${err.message.length} chars`);
+        assert.match(err.message, /502/);
+        assert.match(err.message, new RegExp(`\\(${html.length} bytes\\)`), "it should say how much it dropped");
+        return true;
+      },
+    );
+  });
+
+  test("an aborted request is retried like any other transport failure", async () => {
+    const aborted = new Error("This operation was aborted");
+    const fetchStub = stubFetch([aborted, { body: anthropicBody('{"goal":"g","behavior":"b"}') }]);
+    const s = summarizer(fetchStub.impl, async () => {});
+    assert.equal((await s.summarize(TRACE, FACETS))[0]!.summary, "g");
+  });
+
+  test("every request carries a deadline, so a black-hole connection cannot hang a run", async () => {
+    const fetchStub = stubFetch([{ body: anthropicBody('{"goal":"g","behavior":"b"}') }]);
+    await summarizer(fetchStub.impl, async () => {}).summarize(TRACE, FACETS);
+    assert.ok(fetchStub.calls[0]!.init.signal, "fetch was called with no AbortSignal");
+  });
+});
+
 describe("OpenAiSummarizer", () => {
   test("posts to chat/completions with a bearer token", async () => {
     const fetchStub = stubFetch([{ body: openAiBody('{"goal":"g","behavior":"b"}') }]);
@@ -164,6 +331,46 @@ describe("OpenAiSummarizer", () => {
     assert.equal(out[0]!.summary, "g");
     assert.match(fetchStub.calls[0]!.url, /\/v1\/chat\/completions$/);
     assert.equal((fetchStub.calls[0]!.init.headers as Record<string, string>)["authorization"], "Bearer k");
+  });
+
+  test("the one 400 that is not permanent: max_tokens renamed to max_completion_tokens", async () => {
+    // Newer OpenAI models reject max_tokens and name the field they want. It is
+    // the only 400 worth retrying, and postJson is right to refuse the rest.
+    const fetchStub = stubFetch([
+      {
+        status: 400,
+        body: {
+          error: {
+            message:
+              "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+            type: "invalid_request_error",
+            param: "max_tokens",
+            code: "unsupported_parameter",
+          },
+        },
+      },
+      { body: openAiBody('{"goal":"g","behavior":"b"}') },
+    ]);
+    const s = new OpenAiSummarizer(
+      { ...DEFAULT_CONFIG.llm, provider: "openai", baseUrl: "https://api.openai.com", apiKey: "k" },
+      { fetchImpl: fetchStub.impl, sleep: async () => {} },
+    );
+
+    assert.equal((await s.summarize(TRACE, FACETS))[0]!.summary, "g");
+    assert.equal(fetchStub.count, 2, "exactly one retry, with the renamed field");
+    assert.equal(fetchStub.calls[0]!.body.max_tokens, 400);
+    assert.equal(fetchStub.calls[1]!.body.max_completion_tokens, 400);
+    assert.equal(fetchStub.calls[1]!.body.max_tokens, undefined, "the rejected field must not be sent again");
+  });
+
+  test("any other 400 is still permanent", async () => {
+    const fetchStub = stubFetch([{ status: 400, body: { error: { message: "The model `gpt-9` does not exist." } } }]);
+    const s = new OpenAiSummarizer(
+      { ...DEFAULT_CONFIG.llm, provider: "openai", baseUrl: "https://api.openai.com", apiKey: "k" },
+      { fetchImpl: fetchStub.impl, sleep: async () => {} },
+    );
+    await assert.rejects(() => s.summarize(TRACE, FACETS), /does not exist/);
+    assert.equal(fetchStub.count, 1);
   });
 });
 
