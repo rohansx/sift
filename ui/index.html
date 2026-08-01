@@ -9,58 +9,55 @@
       content="Open source trace intelligence over OpenTelemetry GenAI spans. Groups agent traces into stable, trackable themes, diffs them across releases, and fails your build when one regresses."
     />
     <!--
-      Deliberately not the React app. This page is prose and one table; rendering
-      it through the dashboard bundle would cost 357 kB of JavaScript to say what
-      the HTML already says, and a landing page that waits on a framework to
-      paint is the wrong first impression for a tool whose pitch is that it has
-      no runtime dependencies.
+      Deliberately not the React app. This page is prose, one table and a small
+      animation; rendering it through the dashboard bundle would cost 357 kB of
+      JavaScript to say what the markup already says, and a landing page that
+      waits on a framework to paint is the wrong first impression for a tool
+      whose pitch is that it has no runtime dependencies.
     -->
     <style>
       :root {
         --bg: oklch(0.145 0 0);
         --fg: oklch(0.985 0 0);
         --muted: oklch(0.708 0 0);
+        --faint: oklch(0.42 0 0);
         --line: oklch(0.269 0 0);
         --card: oklch(0.205 0 0);
-        --up: oklch(0.72 0.17 25);
-        --down: oklch(0.75 0.16 150);
-        --accent: oklch(0.75 0.14 240);
+        --bad: oklch(0.72 0.17 25);
+        --good: oklch(0.75 0.16 150);
+        --accent: oklch(0.78 0.13 235);
       }
       @media (prefers-color-scheme: light) {
         :root {
-          --bg: oklch(1 0 0);
-          --fg: oklch(0.145 0 0);
-          --muted: oklch(0.45 0 0);
-          --line: oklch(0.92 0 0);
-          --card: oklch(0.98 0 0);
-          --up: oklch(0.55 0.2 25);
-          --down: oklch(0.52 0.15 150);
-          --accent: oklch(0.55 0.16 240);
+          --bg: oklch(0.995 0 0); --fg: oklch(0.145 0 0); --muted: oklch(0.45 0 0);
+          --faint: oklch(0.75 0 0); --line: oklch(0.9 0 0); --card: oklch(0.975 0 0);
+          --bad: oklch(0.55 0.2 25); --good: oklch(0.5 0.15 150); --accent: oklch(0.52 0.16 235);
         }
       }
       * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
       body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--fg);
+        margin: 0; background: var(--bg); color: var(--fg);
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-        line-height: 1.6;
-        -webkit-font-smoothing: antialiased;
+        line-height: 1.6; -webkit-font-smoothing: antialiased;
       }
-      .wrap { max-width: 68rem; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+      code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .wrap { max-width: 70rem; margin: 0 auto; padding: 0 1.25rem; }
+
       header {
         display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap;
-        border-bottom: 1px solid var(--line); padding-bottom: 0.75rem; margin-bottom: 3.5rem;
+        border-bottom: 1px solid var(--line); padding: 1.5rem 0 0.75rem; margin-bottom: 4rem;
       }
-      .brand { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1rem; font-weight: 500; color: var(--fg); text-decoration: none; }
+      .brand { font-family: ui-monospace, monospace; font-size: 1rem; font-weight: 500; color: var(--fg); text-decoration: none; }
       .tag { font-size: 0.75rem; color: var(--muted); }
       header nav { margin-left: auto; display: flex; gap: 1.25rem; font-size: 0.8125rem; }
+      header nav a { color: var(--muted); text-decoration: none; }
+      header nav a:hover { color: var(--fg); }
       a { color: var(--accent); }
-      header nav a, footer a { color: var(--muted); text-decoration: none; }
-      header nav a:hover, footer a:hover { color: var(--fg); }
-      h1 { font-size: clamp(1.9rem, 4.5vw, 3rem); line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 1.25rem; max-width: 22ch; }
-      .lede { font-size: 1.125rem; color: var(--muted); max-width: 62ch; margin: 0 0 2rem; }
-      .cta { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 3.5rem; }
+
+      h1 { font-size: clamp(2rem, 5vw, 3.25rem); line-height: 1.1; letter-spacing: -0.025em; margin: 0 0 1.25rem; max-width: 20ch; }
+      .lede { font-size: 1.0625rem; color: var(--muted); max-width: 58ch; margin: 0 0 2rem; }
+      .cta { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
       .btn {
         display: inline-block; padding: 0.55rem 1.1rem; border-radius: 0.5rem;
         font-size: 0.9375rem; text-decoration: none; border: 1px solid var(--line);
@@ -68,21 +65,58 @@
       }
       .btn.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 500; }
       .btn:hover { border-color: var(--muted); }
+
+      /* ---- the transformation: unreadable spans -> tracked themes ---- */
+      .show { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: stretch; margin: 4.5rem 0 1rem; }
+      @media (max-width: 60rem) { .show { grid-template-columns: 1fr; } .arrow { transform: rotate(90deg); padding: 0.5rem 0; } }
+      .panel { border: 1px solid var(--line); border-radius: 0.75rem; background: var(--card); overflow: hidden; display: flex; flex-direction: column; }
+      .panel h3 { margin: 0; padding: 0.6rem 0.9rem; font-size: 0.75rem; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--line); letter-spacing: 0.02em; }
+      .arrow { display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 1.5rem; }
+
+      .spans { height: 17rem; overflow: hidden; position: relative; padding: 0.5rem 0; }
+      .spans::after { content: ""; position: absolute; inset: 0; background: linear-gradient(var(--card), transparent 22%, transparent 78%, var(--card)); pointer-events: none; }
+      .spans div { font-size: 0.6875rem; line-height: 1.75; color: var(--faint); white-space: pre; padding: 0 0.9rem; }
+      .scroller { animation: drift 22s linear infinite; }
+      @keyframes drift { from { transform: translateY(0); } to { transform: translateY(-50%); } }
+
+      .themes { height: 17rem; padding: 0.65rem 0.9rem; display: flex; flex-direction: column; gap: 0.1rem; }
+      .row { display: grid; grid-template-columns: 4.6rem 1fr auto; gap: 0.6rem; align-items: baseline; font-size: 0.8125rem; padding: 0.32rem 0; opacity: 0; }
+      .row.in { animation: rise 0.45s ease-out forwards; }
+      @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+      .row .id { color: var(--muted); font-size: 0.75rem; }
+      .row .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .pct { text-align: right; font-variant-numeric: tabular-nums; }
+      .row.flag .lbl, .row.flag .pct { color: var(--bad); }
+      .badge { display: inline-block; margin-left: 0.5rem; font-size: 0.625rem; letter-spacing: 0.04em; padding: 0.05rem 0.35rem; border-radius: 0.25rem; border: 1px solid var(--bad); color: var(--bad); opacity: 0; }
+      .badge.in { animation: rise 0.4s ease-out forwards; }
+      .cap { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 0 0 4.5rem; }
+
+      /* ---- the gate ---- */
       pre {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 0.8125rem; line-height: 1.7; background: var(--card);
+        font-size: 0.8125rem; line-height: 1.75; background: var(--card);
         border: 1px solid var(--line); border-radius: 0.75rem;
-        padding: 1.25rem; overflow-x: auto; margin: 0 0 1rem;
+        padding: 1.1rem 1.25rem; overflow-x: auto; margin: 0;
       }
-      .up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--muted); }
-      h2 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 3.5rem 0 0.5rem; }
-      h2 + p { color: var(--muted); margin: 0 0 1.5rem; max-width: 62ch; }
-      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+      .bad { color: var(--bad); } .good { color: var(--good); } .dim { color: var(--muted); }
+      .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+      @media (max-width: 52rem) { .two { grid-template-columns: 1fr; } }
+
+      h2 { font-size: 1.4rem; letter-spacing: -0.015em; margin: 4.5rem 0 0.4rem; }
+      h2 + p { color: var(--muted); margin: 0 0 1.5rem; max-width: 60ch; }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
       .card { border: 1px solid var(--line); border-radius: 0.75rem; padding: 1.1rem 1.25rem; background: var(--card); }
-      .card h3 { margin: 0 0 0.4rem; font-size: 0.9375rem; }
+      .card h3 { margin: 0 0 0.35rem; font-size: 0.9375rem; }
       .card p { margin: 0; font-size: 0.875rem; color: var(--muted); }
-      footer { margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1.25rem; display: flex; gap: 1.25rem; flex-wrap: wrap; font-size: 0.8125rem; color: var(--muted); }
-      .note { font-size: 0.8125rem; color: var(--muted); margin-top: -0.5rem; }
+      .note { font-size: 0.8125rem; color: var(--muted); }
+      footer { margin-top: 5rem; border-top: 1px solid var(--line); padding: 1.25rem 0 3rem; display: flex; gap: 1.25rem; flex-wrap: wrap; font-size: 0.8125rem; color: var(--muted); }
+      footer a { color: var(--muted); text-decoration: none; }
+      footer a:hover { color: var(--fg); }
+
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        .scroller { animation: none; }
+        .row, .badge { opacity: 1 !important; animation: none !important; }
+      }
     </style>
   </head>
   <body>
@@ -97,102 +131,113 @@
       </header>
 
       <main>
-        <h1>Sentry-grade issue tracking for agent behavior.</h1>
+        <h1>Your agent wrote 40,000 traces last week. Nobody read them.</h1>
         <p class="lede">
-          Your agent produces thousands of traces. Nobody reads them. Your evals only catch failure
-          modes you already knew about — the expensive ones are the failures you didn't anticipate.
-          sift reads the traces for you, groups what it finds into stable, trackable themes, and
-          tells you what changed since your last deploy.
+          Evals only catch the failures you already thought of. The expensive ones are the failures
+          you didn't — and today the only way to find those is an engineer reading traces by hand
+          until they get bored. sift reads them, groups what it finds into themes that keep their
+          names, and tells you which one got worse since you shipped.
         </p>
-
         <div class="cta">
           <a class="btn primary" href="/app">Open the live dashboard</a>
           <a class="btn" href="https://github.com/rohansx/sift">Source on GitHub</a>
         </div>
 
-        <pre><span class="dim">$</span> sift analyze --since 7d
+        <div class="show">
+          <div class="panel">
+            <h3>2,340 OTLP spans</h3>
+            <div class="spans"><div class="scroller" id="spans"></div></div>
+          </div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="panel">
+            <h3>12 themes, one of them getting worse</h3>
+            <div class="themes mono" id="themes"></div>
+          </div>
+        </div>
+        <p class="cap">Same week of traffic. The thing on the right is what you can actually act on.</p>
 
-  THEMES (agent: support-bot, 2,340 traces)
+        <h2>A theme is an issue, not a chart</h2>
+        <p>
+          Clustering dashboards fail for two reasons: the labels rename themselves every week, and
+          re-clustering gets more expensive the longer you run it. sift discovers once, then
+          <em>assigns</em> — so <code>SIFT-14</code> means the same thing next month, which is the
+          precondition for tracking anything at all.
+        </p>
+        <div class="two">
+          <pre><span class="dim">$</span> sift resolve SIFT-20 --note <span class="good">"fixed in v1.3"</span>
+<span class="dim">SIFT-20 is now resolved</span>
 
-  ▸ SIFT-14  tool-retry loop on search_kb        <span class="up">↑ 11.2%</span>  (was 2.1%)  <span class="up">REGRESSED</span>
-  ▸ SIFT-3   user asks for refund, agent deflects   8.4%   (± 0.3%)   active
-  ▸ SIFT-21  context lost after long tool output    4.1%   NEW
-  ▸ SIFT-7   billing questions resolved first-try  31.0%   <span class="down">(↑ 2.2%)</span>  active
+<span class="dim"># ... the next release ships ...</span>
 
-  ○ residual pile: 118 traces (5.0%) — discovery will re-run at 8%</pre>
-        <p class="note">The dashboard above is the same data, rendered. It is a published snapshot of synthetic traffic — no real traces.</p>
+<span class="dim">$</span> sift check --fail-on regression
+
+  <span class="bad">✗ sift check failed — 1 finding</span>
+
+    <span class="bad">REGRESSED</span>  SIFT-20  retry loop on search_kb
+      2.0% <span class="bad">→ 15.0%</span> between v1.2 and v1.3
+
+<span class="dim">$</span> echo $?
+<span class="bad">1</span></pre>
+          <div>
+            <p style="margin-top:0">
+              A theme you marked <code>resolved</code> picking traffic back up is a regression in
+              Sentry's sense of the word — and it exits non-zero, so the build stops. Discovery that
+              can't fail a build stays something somebody has to remember to go and look at.
+            </p>
+            <p>
+              Regressions only, by default. Gating on anything <em>new</em> would turn every release
+              red and teach the team to ignore the gate.
+            </p>
+            <p class="note">
+              <code>sift export SIFT-20 --format mastra-scorer</code> then turns that theme into eval
+              cases seeded from the real traces in it. Discovery → known failure → regression test.
+            </p>
+          </div>
+        </div>
 
         <h2>How it works</h2>
         <p>
           The technique comes from <a href="https://www.anthropic.com/research/clio">Anthropic's Clio</a>:
-          don't cluster raw traces, they're too long and too noisy to embed. Have a model write one-line
-          summaries along a few fixed dimensions, then cluster <em>those</em>. sift adds the parts that
-          make it a tool rather than a demo.
+          raw traces are too long and too noisy to embed, so a model writes one-line summaries along a
+          few fixed dimensions and those get clustered instead. sift adds the parts that make it a
+          tool rather than a demo.
         </p>
-
         <div class="grid">
           <div class="card">
-            <h3>Classification-first</h3>
-            <p>
-              Clustering runs at bootstrap and on the residual pile only. After that, themes live in a
-              persistent registry and each new trace is <em>assigned</em> by nearest centroid — one
-              embedding, one cosine. Labels stop renaming themselves weekly, and cost stops growing
-              with your history.
-            </p>
+            <h3>Assignment, not re-clustering</h3>
+            <p>One embedding and one cosine per new trace. Clustering only runs at bootstrap and on the residual pile, so steady-state cost stops growing with your history.</p>
           </div>
           <div class="card">
-            <h3>Themes have a lifecycle</h3>
-            <p>
-              A theme gets a stable id and a state machine: new → active → regressed / resolved / muted.
-              Like a Sentry issue, not like a chart. That identity is what makes tracking, alerting and
-              accountability possible at all.
-            </p>
+            <h3>Stable ids and a lifecycle</h3>
+            <p>new → active → regressed / resolved / muted. The identity is what makes tracking, alerting and accountability possible.</p>
           </div>
           <div class="card">
             <h3>Deltas, not snapshots</h3>
-            <p>
-              The question is never "what are my themes." It's "what changed since Tuesday's deploy."
-              sift diffs theme distributions across releases and scores each change against that
-              theme's own historical variance.
-            </p>
+            <p>Each change is scored against that theme's own historical variance — a theme that swings 10 points weekly hasn't done anything by swinging 10 points again.</p>
           </div>
           <div class="card">
-            <h3>It can block a deploy</h3>
-            <p>
-              <code>sift check --fail-on regression</code> exits non-zero when a theme you'd marked
-              resolved picks traffic back up. Regressions only by default — gating on anything new
-              would turn every release red and teach everyone to ignore the gate.
-            </p>
-          </div>
-          <div class="card">
-            <h3>Closes the loop into evals</h3>
-            <p>
-              <code>sift export</code> turns a failure theme into eval cases seeded from the real
-              traces in that cluster. Discovery → known failure → regression test → resolved. That
-              loop is the product; the clusters are just the intake.
-            </p>
+            <h3>OTel-native</h3>
+            <p>GenAI semantic-convention spans from Mastra, Langfuse, Phoenix, OpenLIT or raw OTLP. Point an exporter at <code>sift serve</code> and it collects.</p>
           </div>
           <div class="card">
             <h3>Local-first, gated</h3>
-            <p>
-              One SQLite file, zero runtime dependencies, embeddings can run locally. When summaries do
-              go to a hosted model, a pseudonymization pass rewrites emails, cards, IPs and keys first.
-              Traces are the most PII-dense artifact you produce.
-            </p>
+            <p>One SQLite file, zero runtime dependencies, embeddings can run locally. Summaries bound for a hosted model get emails, cards, IPs and keys rewritten first.</p>
+          </div>
+          <div class="card">
+            <h3>Honest about its limits</h3>
+            <p>The README says what isn't built and what isn't verified, including where the offline embedder falls down. Measured, not asserted.</p>
           </div>
         </div>
 
         <h2>Try it without an API key</h2>
         <p>The offline providers run the whole pipeline — ingest, summarize, embed, discover, delta — with no network and no key.</p>
-        <pre><span class="dim">$</span> npm install -g @siftlabs/sift
-
-<span class="dim">$</span> export SIFT_LLM_PROVIDER=fake SIFT_EMBED_PROVIDER=hash
+        <pre><span class="dim">$</span> export SIFT_LLM_PROVIDER=fake SIFT_EMBED_PROVIDER=hash
 <span class="dim">$</span> sift demo --out ./traces.jsonl   <span class="dim"># synthetic traffic, planted failures</span>
 <span class="dim">$</span> sift analyze --otlp ./traces.jsonl
 <span class="dim">$</span> sift serve                       <span class="dim"># the dashboard, on localhost</span></pre>
-        <p class="note">
-          Requires Node 22.18+. The package name is a placeholder scope until the first publish — build from
-          source in the meantime.
+        <p class="note" style="margin-top:0.75rem">
+          Requires Node 22.18+. Apache-2.0. The npm scope is a placeholder until the first publish —
+          build from source in the meantime.
         </p>
       </main>
 
@@ -204,5 +249,55 @@
         <a href="https://arxiv.org/abs/2412.13678">Clio paper</a>
       </footer>
     </div>
+
+    <script>
+      // Two small pieces of theatre, both degrading to a correct static page:
+      // the span wall is CSS-only, and the theme rows just get a class. With
+      // JS off you still see every row, because they are written by this script
+      // into a container that is otherwise empty — so keep the payload tiny and
+      // the fallback honest by rendering immediately when motion is unwanted.
+      const TOOLS = ["search_kb", "lookup_billing", "escalate", "refund_status", "fetch_order"];
+      const OPS = ["chat", "execute_tool", "chat", "execute_tool"];
+      const spans = document.getElementById("spans");
+      let out = "";
+      for (let i = 0; i < 40; i++) {
+        const t = TOOLS[i % TOOLS.length];
+        const id = (0x5b8efff + i * 7919).toString(16).padStart(8, "0");
+        out +=
+          `{"trace_id":"${id}c60c","span_id":"${id.slice(0, 6)}","name":"${OPS[i % OPS.length]}",\n` +
+          `  "attributes":{"gen_ai.tool.name":"${t}","gen_ai.operation.name":"chat",\n` +
+          `  "gen_ai.prompt":"...","service.version":"v1.${i % 4}"}}\n`;
+      }
+      // Duplicated so the -50% keyframe loops seamlessly.
+      spans.innerHTML = `<div>${out}</div><div>${out}</div>`;
+
+      const ROWS = [
+        ["SIFT-14", "tool-retry loop on search_kb", "11.2%", true],
+        ["SIFT-7", "billing questions resolved first-try", "31.0%", false],
+        ["SIFT-3", "user asks for refund, agent deflects", "8.4%", false],
+        ["SIFT-21", "context lost after long tool output", "4.1%", false],
+        ["SIFT-9", "escalated to a human within 2 turns", "6.8%", false],
+        ["SIFT-2", "order status answered from cache", "5.5%", false],
+      ];
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const host = document.getElementById("themes");
+      ROWS.forEach(([id, label, pct, flag], i) => {
+        const row = document.createElement("div");
+        row.className = "row" + (flag ? " flag" : "");
+        row.innerHTML =
+          `<span class="id">▸ ${id}</span><span class="lbl">${label}` +
+          (flag ? `<span class="badge${reduce ? " in" : ""}">REGRESSED</span>` : "") +
+          `</span><span class="pct">${pct}</span>`;
+        host.appendChild(row);
+        if (reduce) {
+          row.style.opacity = "1";
+          return;
+        }
+        setTimeout(() => {
+          row.classList.add("in");
+          if (flag) setTimeout(() => row.querySelector(".badge").classList.add("in"), 900);
+        }, 220 + i * 130);
+      });
+    </script>
   </body>
 </html>
